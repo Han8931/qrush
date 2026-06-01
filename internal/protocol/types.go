@@ -1,0 +1,100 @@
+package protocol
+
+import (
+	"encoding/json"
+	"time"
+)
+
+type JobState int
+
+const (
+	StateQueued JobState = iota
+	StateAllocating
+	StateRunning
+	StateFinished
+	StateSkipped
+	StateHoldingClient
+)
+
+func (s JobState) String() string {
+	switch s {
+	case StateQueued:
+		return "queued"
+	case StateAllocating:
+		return "allocating"
+	case StateRunning:
+		return "running"
+	case StateFinished:
+		return "finished"
+	case StateSkipped:
+		return "skipped"
+	case StateHoldingClient:
+		return "holding_client"
+	default:
+		return "unknown"
+	}
+}
+
+func (s JobState) MarshalJSON() ([]byte, error) {
+	return json.Marshal(s.String())
+}
+
+type ListFormat int
+
+const (
+	FormatDefault ListFormat = iota
+	FormatJSON
+	FormatTab
+)
+
+type Result struct {
+	ExitCode     int
+	DiedBySignal bool
+	Signal       int
+	UserTimeMS   int64
+	SystemTimeMS int64
+	RealTimeMS   int64
+	Skipped      bool
+}
+
+type JobInfo struct {
+	ID             int
+	Command        string
+	State          JobState
+	Result         Result
+	OutputFilename string
+	StoreOutput    bool
+	PID            int
+	DependOn       []int
+	Label          string
+	Session        string
+	Message        string
+	NumSlots       int
+	NumGPUs        int
+	GPUIDs         []int
+	EnqueueTime    time.Time
+	StartTime      time.Time
+	EndTime        time.Time
+}
+
+type SessionInfo struct {
+	Name  string
+	Group string
+}
+
+type NewJobRequest struct {
+	Command        string
+	CommandArgs    []string
+	WorkDir        string
+	Environment    []string
+	StoreOutput    bool
+	SeparateStderr bool
+	GzipOutput     bool
+	DependOn       []int
+	RequireElevel  bool
+	Label          string
+	Session        string
+	Message        string
+	NumSlots       int
+	Logfile        string
+}
