@@ -571,6 +571,7 @@ func (s *Server) handleSessionRename(conn net.Conn, msg *protocol.Msg) bool {
 	if !s.jobs.RenameSession(payload.OldName, payload.NewName) {
 		return s.sendError(conn, "cannot rename session")
 	}
+	s.terminals.RenameLayout(payload.OldName, payload.NewName)
 	return s.sendMsg(conn, &protocol.Msg{Type: protocol.MsgSessionRenameOK})
 }
 
@@ -583,6 +584,7 @@ func (s *Server) handleSessionDelete(conn net.Conn, msg *protocol.Msg) bool {
 	if !ok {
 		return s.sendError(conn, reason)
 	}
+	s.terminals.DropSession(payload.Name)
 	return s.sendMsg(conn, &protocol.Msg{Type: protocol.MsgSessionDeleteOK})
 }
 

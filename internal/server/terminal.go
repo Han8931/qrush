@@ -270,6 +270,48 @@ func (m *TerminalManager) SetLayout(session string, blob []byte, keep []string) 
 	}
 }
 
+// RenameLayout migrates a session's persisted layout blob to a new name so the
+// old key is not stranded in memory after a session rename. Live panes keep
+// their existing session name (unchanged behavior); only the blob is moved.
+func (m *TerminalManager) RenameLayout(oldName, newName string) {
+	if oldName == "" {
+		oldName = "default"
+	}
+	if newName == "" {
+		newName = "default"
+	}
+	if oldName == newName {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if blob, ok := m.layouts[oldName]; ok {
+		m.layouts[newName] = blob
+		delete(m.layouts, oldName)
+	}
+}
+
+// DropSession removes all persisted state for a session: it deletes the layout
+// blob and kills any live panes. Used when a session is deleted outright.
+func (m *TerminalManager) DropSession(session string) {
+	if session == "" {
+		session = "default"
+	}
+	m.mu.Lock()
+	delete(m.layouts, session)
+	var doomed []*TerminalPTY
+	for key, t := range m.sessions {
+		if t.session == session {
+			doomed = append(doomed, t)
+			delete(m.sessions, key)
+		}
+	}
+	m.mu.Unlock()
+	for _, t := range doomed {
+		t.Kill()
+	}
+}
+
 func terminalShellCommand(shell string) (*exec.Cmd, string) {
 	name := filepath.Base(shell)
 	switch name {

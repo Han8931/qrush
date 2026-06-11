@@ -227,10 +227,12 @@ func (e *Executor) runOnFinishHook(job *Job, result protocol.Result) {
 		fmt.Sprintf("TS_EXIT_CODE=%d", result.ExitCode),
 		fmt.Sprintf("TS_OUTPUT=%s", job.Info.OutputFilename),
 	)
-	_ = cmd.Start()
-	if cmd.Process != nil {
-		_ = cmd.Process.Release()
+	if err := cmd.Start(); err != nil {
+		return
 	}
+	// Reap the hook process so it doesn't linger as a zombie. We don't block
+	// the caller on it, so wait in the background and discard the result.
+	go func() { _ = cmd.Wait() }()
 }
 
 func parseCommand(cmd string) []string {
