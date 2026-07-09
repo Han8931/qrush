@@ -58,11 +58,15 @@ func TailOutput(id int) error {
 				return nil
 			}
 			if state == protocol.StateFinished || state == protocol.StateSkipped {
-				n, _ := f.Read(buf)
-				if n > 0 {
+				// Drain everything written between our last EOF and the state
+				// check; a single read caps the tail at one buffer.
+				for {
+					n, _ := f.Read(buf)
+					if n == 0 {
+						return nil
+					}
 					os.Stdout.Write(buf[:n])
 				}
-				return nil
 			}
 			time.Sleep(200 * time.Millisecond)
 		}

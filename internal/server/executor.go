@@ -87,7 +87,7 @@ func (e *Executor) Run(req ExecRequest) {
 		cmd.Env = job.Environment
 	}
 
-	usePTY := job.Info.StoreOutput && !job.SeparateStderr
+	usePTY := ptySupported && job.Info.StoreOutput && !job.SeparateStderr
 	if !usePTY {
 		setSysProcAttr(cmd)
 	}
@@ -137,6 +137,11 @@ func (e *Executor) Run(req ExecRequest) {
 	} else {
 		if job.Info.StoreOutput {
 			cmd.Stdout = outFile
+			// Without a PTY (Windows, or -E), stderr isn't merged for us; when
+			// it has no .e file of its own it belongs in the output file.
+			if !job.SeparateStderr {
+				cmd.Stderr = outFile
+			}
 		}
 		if err := cmd.Start(); err != nil {
 			if outFile != nil {

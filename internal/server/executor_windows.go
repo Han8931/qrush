@@ -11,6 +11,11 @@ import (
 	"github.com/han/qrush/internal/protocol"
 )
 
+// ptySupported reports whether creack/pty can allocate PTYs on this platform.
+// creack/pty has no ConPTY backend — pty.Start returns ErrUnsupported on
+// Windows — so jobs must fall back to plain file redirection.
+const ptySupported = false
+
 func setSysProcAttr(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP,

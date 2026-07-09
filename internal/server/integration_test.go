@@ -3,6 +3,7 @@ package server_test
 import (
 	"bytes"
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -13,12 +14,24 @@ import (
 	"github.com/han/qrush/internal/server"
 )
 
+// shortSocketPath returns a socket path in a freshly created short temp dir.
+// t.TempDir() embeds the full test name, which pushes the path past the
+// 104-byte sun_path limit on macOS and makes bind fail with EINVAL.
+func shortSocketPath(t *testing.T) string {
+	dir, err := os.MkdirTemp("", "qrush")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return filepath.Join(dir, "qrush.sock")
+}
+
 // TestTerminalPersistenceOverSocket drives the real client→daemon→PTY→stream
 // path over a unix socket: open a pane, run a command, detach, reattach, and
 // confirm the backlog still replays (persistence). Also checks layout get/set
 // and reaping via the wire.
 func TestTerminalPersistenceOverSocket(t *testing.T) {
-	sock := filepath.Join(t.TempDir(), "qrush.sock")
+	sock := shortSocketPath(t)
 	t.Setenv("QRUSH_SOCKET", sock)
 	t.Setenv("SHELL", "/bin/sh")
 
@@ -80,7 +93,7 @@ func TestTerminalPersistenceOverSocket(t *testing.T) {
 // TestRequestJobsViewSignal verifies the open-jobs-view signal: a request sets
 // a one-shot flag that the next tree poll observes and clears.
 func TestRequestJobsViewSignal(t *testing.T) {
-	sock := filepath.Join(t.TempDir(), "qrush.sock")
+	sock := shortSocketPath(t)
 	t.Setenv("QRUSH_SOCKET", sock)
 
 	srv, err := server.New(config.Load())

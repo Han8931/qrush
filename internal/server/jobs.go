@@ -68,6 +68,15 @@ func (q *JobQueue) RerunRequest(id int) (protocol.NewJobRequest, bool) {
 }
 
 func (q *JobQueue) Add(req protocol.NewJobRequest) *Job {
+	return q.AddWithOutputPath(req, nil)
+}
+
+// AddWithOutputPath enqueues a job and, when output is stored, assigns its
+// output filename via pathFor inside the same critical section. Setting the
+// path after Add returns would race with the scheduler: a concurrent poke can
+// start the job first, making the executor pick a different random path than
+// the one later recorded in Info.OutputFilename.
+func (q *JobQueue) AddWithOutputPath(req protocol.NewJobRequest, pathFor func(jobID int, logfile string) string) *Job {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -106,6 +115,9 @@ func (q *JobQueue) Add(req protocol.NewJobRequest) *Job {
 		WorkDir:          req.WorkDir,
 		Environment:      req.Environment,
 		Logfile:          req.Logfile,
+	}
+	if pathFor != nil && req.StoreOutput {
+		j.Info.OutputFilename = pathFor(j.ID, req.Logfile)
 	}
 
 	q.jobs = append(q.jobs, j)

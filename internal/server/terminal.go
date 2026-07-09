@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 
@@ -179,6 +180,9 @@ func (m *TerminalManager) KillAll() {
 }
 
 func startTerminalPTY(session, pane string, cols, rows int) (*TerminalPTY, error) {
+	if !ptySupported {
+		return nil, fmt.Errorf("interactive panes need a PTY, which is not available on %s", runtime.GOOS)
+	}
 	if session == "" {
 		session = "default"
 	}

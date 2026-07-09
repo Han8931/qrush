@@ -255,10 +255,7 @@ func (s *Server) handleNewJob(conn net.Conn, msg *protocol.Msg) bool {
 	}
 	req := payload.Request
 	req.Environment = s.envStore.Apply(req.Environment)
-	job := s.jobs.Add(req)
-	if req.StoreOutput {
-		s.jobs.SetOutputFilename(job.ID, s.executor.OutputPathFor(job.ID, req.Logfile))
-	}
+	job := s.jobs.AddWithOutputPath(req, s.executor.OutputPathFor)
 
 	ok := s.sendMsg(conn, &protocol.Msg{
 		Type:    protocol.MsgNewJobOK,
@@ -278,10 +275,7 @@ func (s *Server) handleRerun(conn net.Conn, msg *protocol.Msg) bool {
 	if !ok {
 		return s.sendError(conn, fmt.Sprintf("job %d not found", payload.JobID))
 	}
-	job := s.jobs.Add(req)
-	if req.StoreOutput {
-		s.jobs.SetOutputFilename(job.ID, s.executor.OutputPathFor(job.ID, req.Logfile))
-	}
+	job := s.jobs.AddWithOutputPath(req, s.executor.OutputPathFor)
 	sent := s.sendMsg(conn, &protocol.Msg{
 		Type:    protocol.MsgNewJobOK,
 		Payload: protocol.PayloadJobID{JobID: job.ID},

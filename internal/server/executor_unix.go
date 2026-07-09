@@ -10,6 +10,9 @@ import (
 	"github.com/han/qrush/internal/protocol"
 )
 
+// ptySupported reports whether creack/pty can allocate PTYs on this platform.
+const ptySupported = true
+
 func setSysProcAttr(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
