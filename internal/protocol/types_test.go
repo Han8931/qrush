@@ -48,6 +48,29 @@ func TestJobStateMarshalJSON(t *testing.T) {
 	}
 }
 
+func TestJobStateJSONRoundTrip(t *testing.T) {
+	for state := StateQueued; state <= StateHoldingClient; state++ {
+		data, err := json.Marshal(state)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var restored JobState
+		if err := json.Unmarshal(data, &restored); err != nil {
+			t.Fatalf("unmarshal %s: %v", data, err)
+		}
+		if restored != state {
+			t.Fatalf("got %v, want %v", restored, state)
+		}
+	}
+}
+
+func TestJobStateUnmarshalRejectsUnknownState(t *testing.T) {
+	var state JobState
+	if err := json.Unmarshal([]byte(`"lost"`), &state); err == nil {
+		t.Fatal("expected unknown state to fail")
+	}
+}
+
 func TestJobInfoMarshalJSON(t *testing.T) {
 	j := JobInfo{
 		ID:      1,

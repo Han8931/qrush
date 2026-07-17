@@ -8,12 +8,12 @@ import (
 )
 
 type Scheduler struct {
-	jobs         *JobQueue
-	executor     *Executor
-	maxSlots     int
-	trigger      chan struct{}
-	mu           sync.Mutex
-	onFinishHook func()
+	jobs              *JobQueue
+	executor          *Executor
+	maxSlots          int
+	trigger           chan struct{}
+	mu                sync.Mutex
+	onStateChangeHook func()
 }
 
 func NewScheduler(jobs *JobQueue, executor *Executor, maxSlots int) *Scheduler {
@@ -68,6 +68,9 @@ func (s *Scheduler) trySchedule() {
 		}
 
 		s.jobs.SetRunning(job.ID, 0, "")
+		if s.onStateChangeHook != nil {
+			s.onStateChangeHook()
+		}
 		go s.executor.Run(ExecRequest{
 			Job:      job,
 			JobQueue: s.jobs,
@@ -78,14 +81,14 @@ func (s *Scheduler) trySchedule() {
 
 func (s *Scheduler) onJobFinish(jobID int, result protocol.Result) {
 	s.jobs.MarkFinished(jobID, result)
-	if s.onFinishHook != nil {
-		s.onFinishHook()
+	if s.onStateChangeHook != nil {
+		s.onStateChangeHook()
 	}
 	s.Poke()
 }
 
-func (s *Scheduler) SetOnFinishHook(fn func()) {
-	s.onFinishHook = fn
+func (s *Scheduler) SetOnStateChangeHook(fn func()) {
+	s.onStateChangeHook = fn
 }
 
 func (s *Scheduler) Poke() {

@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -37,6 +38,27 @@ func (s JobState) String() string {
 
 func (s JobState) MarshalJSON() ([]byte, error) {
 	return json.Marshal(s.String())
+}
+
+func (s *JobState) UnmarshalJSON(data []byte) error {
+	var name string
+	if err := json.Unmarshal(data, &name); err != nil {
+		return fmt.Errorf("job state must be a string: %w", err)
+	}
+	states := map[string]JobState{
+		"queued":         StateQueued,
+		"allocating":     StateAllocating,
+		"running":        StateRunning,
+		"finished":       StateFinished,
+		"skipped":        StateSkipped,
+		"holding_client": StateHoldingClient,
+	}
+	state, ok := states[name]
+	if !ok {
+		return fmt.Errorf("unknown job state %q", name)
+	}
+	*s = state
+	return nil
 }
 
 type ListFormat int

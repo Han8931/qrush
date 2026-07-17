@@ -35,8 +35,9 @@ type Server struct {
 }
 
 func New(cfg *config.Config) (*Server, error) {
-	if cfg.SaveList != "" {
-		return nil, fmt.Errorf("QRUSH_SAVELIST is not implemented")
+	jobs, err := loadJobQueue(cfg.SaveList)
+	if err != nil {
+		return nil, err
 	}
 	path := ipc.SocketPath()
 	listener, err := ipc.NewListener(path)
@@ -47,7 +48,6 @@ func New(cfg *config.Config) (*Server, error) {
 	logDir := cfg.TmpDir
 	executor := NewExecutor(logDir)
 	executor.SetOnFinishCommand(cfg.OnFinish)
-	jobs := NewJobQueue()
 	scheduler := NewScheduler(jobs, executor, cfg.Slots)
 	terminals := NewTerminalManager()
 
@@ -64,7 +64,7 @@ func New(cfg *config.Config) (*Server, error) {
 		maxFinished: cfg.MaxFinished,
 	}
 
-	scheduler.SetOnFinishHook(srv.pruneFinished)
+	scheduler.SetOnStateChangeHook(srv.queueChanged)
 
 	return srv, nil
 }
@@ -112,6 +112,7 @@ func (s *Server) Shutdown() {
 		close(s.done)
 		s.executor.KillAll()
 		s.terminals.KillAll()
+		s.persistQueue()
 		s.listener.Close()
 	})
 }
@@ -148,6 +149,7 @@ func (s *Server) sendError(conn net.Conn, message string) bool {
 }
 
 func (s *Server) dispatch(ctx context.Context, conn net.Conn, msg *protocol.Msg) bool {
+	defer s.persistQueue()
 	switch msg.Type {
 	case protocol.MsgNewJob:
 		return s.handleNewJob(conn, msg)
@@ -692,4 +694,15 @@ func (s *Server) pruneFinished() {
 		return
 	}
 	s.jobs.PruneFinished(s.maxFinished)
+}
+
+func (s *Server) queueChanged() {
+	s.pruneFinished()
+	s.persistQueue()
+}
+
+func (s *Server) persistQueue() {
+	if err := s.jobs.save(s.cfg.SaveList); err != nil {
+		log.Printf("persist queue: %v", err)
+	}
 }
