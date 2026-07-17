@@ -40,11 +40,15 @@ const (
 	confirmNone confirmKind = iota
 	confirmRemove
 	confirmClear
+	confirmDeleteSession
+	confirmDeleteGroup
 )
 
 type confirmState struct {
-	kind confirmKind
-	ids  []int // jobs targeted by a confirmRemove
+	kind    confirmKind
+	ids     []int  // jobs targeted by a confirmRemove
+	session string // session targeted by confirmDeleteSession
+	group   string // group targeted by confirmDeleteGroup
 }
 
 const (
@@ -52,15 +56,36 @@ const (
 	pagerByteCap     = 1 << 20 // 1 MiB tail cap for the output pager
 )
 
+// mgmtRowKind tags a row in the unified group→session→job management list.
+type mgmtRowKind int
+
+const (
+	rowGroup mgmtRowKind = iota
+	rowSession
+	rowJob
+)
+
+// mgmtRow is one visible line in the management list. Group and session rows
+// index back into m.nodes; job rows carry their JobInfo payload directly.
+type mgmtRow struct {
+	kind       mgmtRowKind
+	nodeIdx    int              // index into m.nodes (all kinds)
+	sessionIdx int              // index into node.sessions (session/job rows)
+	session    string           // session name (session/job rows)
+	group      string           // group name (all kinds)
+	job        protocol.JobInfo // populated for rowJob
+	depth      int              // indentation level
+}
+
 // jobsView holds all state for the full-screen job-management modal.
 type jobsView struct {
 	mode    jobsSubMode
 	allJobs []protocol.JobInfo // raw, refreshed each tick
-	rows    []protocol.JobInfo // derived: filtered + sorted (visible)
+	rows    []mgmtRow          // derived: flattened visible group/session/job rows
 
-	cursorID int // selection anchored by job ID, not index
-	cursor   int
-	offset   int
+	cursorKey string // selection anchored by composite key, not index
+	cursor    int
+	offset    int
 
 	scopeAll  bool
 	filtering bool
@@ -73,7 +98,20 @@ type jobsView struct {
 	pendingTimer int
 
 	confirm confirmState
+	form    sessionForm
 	pager   pagerState
+}
+
+// sessionForm is the small modal for creating or editing a session (name +
+// group). It is shown over the management list.
+type sessionForm struct {
+	active     bool
+	creating   bool // blank form → SessionCreate; else rename/move
+	origName   string
+	origGroup  string
+	nameInput  textinput.Model
+	groupInput textinput.Model
+	focusField int // 0 = name, 1 = group
 }
 
 type pagerState struct {
@@ -113,12 +151,17 @@ type pagerLoadedMsg struct {
 
 // --- open / refresh -------------------------------------------------------
 
-func (m model) openJobsView() model {
+// openJobsView switches to the full-screen management view and enables mouse
+// capture (so sessions/jobs can be clicked). The returned command turns mouse
+// reporting on; callers batch it with their own commands.
+func (m model) openJobsView() (model, tea.Cmd) {
 	m.viewMode = viewJobs
-	m.jobs = jobsView{}
+	// Preserve the collapse state across re-entry, but reset transient sub-state.
+	m.jobs = jobsView{scopeAll: m.jobs.scopeAll, filter: m.jobs.filter}
 	m.jobs.allJobs = m.collectJobs()
 	m.refreshJobsRows()
-	return m
+	m.mouseOn = true
+	return m, tea.EnableMouseCellMotion
 }
 
 // collectJobs flattens the per-session job lists already cached in the tree.
@@ -132,10 +175,52 @@ func (m model) collectJobs() []protocol.JobInfo {
 	return out
 }
 
+// buildMgmtRows flattens the group→session→job tree into the visible rows,
+// honouring group and per-session expansion plus the active job filter/scope.
+func (m model) buildMgmtRows() []mgmtRow {
+	var out []mgmtRow
+	for ni, node := range m.nodes {
+		out = append(out, mgmtRow{kind: rowGroup, nodeIdx: ni, group: node.group})
+		if !node.expanded {
+			continue
+		}
+		for si, session := range node.sessions {
+			out = append(out, mgmtRow{
+				kind: rowSession, nodeIdx: ni, sessionIdx: si,
+				session: session.Name, group: node.group, depth: 1,
+			})
+			if !m.sessionExpanded[session.Name] {
+				continue
+			}
+			jobs := sortJobs(filterJobs(node.jobs[session.Name], m.jobs.filter, session.Name, true))
+			for _, j := range jobs {
+				out = append(out, mgmtRow{
+					kind: rowJob, nodeIdx: ni, sessionIdx: si,
+					session: session.Name, group: node.group, job: j, depth: 2,
+				})
+			}
+		}
+	}
+	return out
+}
+
+// rowKey is a stable identity for a row so the cursor survives refresh and
+// expand/collapse.
+func rowKey(r mgmtRow) string {
+	switch r.kind {
+	case rowGroup:
+		return "g:" + r.group
+	case rowSession:
+		return "s:" + r.session
+	default:
+		return fmt.Sprintf("j:%d", r.job.ID)
+	}
+}
+
 func (m *model) refreshJobsRows() {
-	rows := sortJobs(filterJobs(m.jobs.allJobs, m.jobs.filter, m.activeSession, m.jobs.scopeAll))
+	rows := m.buildMgmtRows()
 	m.jobs.rows = rows
-	m.jobs.cursor, m.jobs.cursorID = anchorCursor(rows, m.jobs.cursorID, m.jobs.cursor)
+	m.jobs.cursor, m.jobs.cursorKey = anchorMgmtCursor(rows, m.jobs.cursorKey, m.jobs.cursor)
 	m.jobs.offset = clampOffset(m.jobs.cursor, m.jobs.offset, m.jobsBodyHeight(), len(rows))
 	if m.jobs.anchor >= len(rows) {
 		m.jobs.anchor = len(rows) - 1
@@ -145,9 +230,51 @@ func (m *model) refreshJobsRows() {
 	}
 }
 
-func (m model) jobsSelected() (protocol.JobInfo, bool) {
+// anchorMgmtCursor keeps the cursor on the row with the same key across
+// rebuilds, falling back to the previous index when the row is gone.
+func anchorMgmtCursor(rows []mgmtRow, key string, prev int) (int, string) {
+	if len(rows) == 0 {
+		return 0, ""
+	}
+	for i, r := range rows {
+		if rowKey(r) == key {
+			return i, key
+		}
+	}
+	nc := prev
+	if nc >= len(rows) {
+		nc = len(rows) - 1
+	}
+	if nc < 0 {
+		nc = 0
+	}
+	return nc, rowKey(rows[nc])
+}
+
+// visibleJobs extracts the job payloads from the current rows, for summary and
+// state-count lines.
+func (m model) visibleJobs() []protocol.JobInfo {
+	var out []protocol.JobInfo
+	for _, r := range m.jobs.rows {
+		if r.kind == rowJob {
+			out = append(out, r.job)
+		}
+	}
+	return out
+}
+
+// jobsCursorRow returns the row under the cursor.
+func (m model) jobsCursorRow() (mgmtRow, bool) {
 	if m.jobs.cursor >= 0 && m.jobs.cursor < len(m.jobs.rows) {
 		return m.jobs.rows[m.jobs.cursor], true
+	}
+	return mgmtRow{}, false
+}
+
+// jobsSelected returns the job under the cursor, only when it is a job row.
+func (m model) jobsSelected() (protocol.JobInfo, bool) {
+	if r, ok := m.jobsCursorRow(); ok && r.kind == rowJob {
+		return r.job, true
 	}
 	return protocol.JobInfo{}, false
 }
@@ -256,6 +383,14 @@ func computeJobColumns(inner int) columnWidths {
 }
 
 func formatJobRow(j protocol.JobInfo, c columnWidths) string {
+	return renderJobsRow(j, c, nil)
+}
+
+// renderJobsRow renders one table row. When bg is non-nil the row is drawn as a
+// highlight: every cell — and the padding within it — carries that background,
+// while each cell keeps its own semantic foreground. This lets the focused row
+// stay tinted without flattening the state colors (running=green, failed=red).
+func renderJobsRow(j protocol.JobInfo, c columnWidths, bg lipgloss.TerminalColor) string {
 	timeStr := ""
 	if j.State == protocol.StateRunning || j.State == protocol.StateFinished {
 		timeStr = format.Duration(j.Result.RealTimeMS)
@@ -264,14 +399,37 @@ func formatJobRow(j protocol.JobInfo, c columnWidths) string {
 	if j.Label != "" {
 		cmd = "[" + j.Label + "] " + j.Command
 	}
-	id := jobIDStyle.Render(fmt.Sprintf("%*d", c.id, j.ID))
-	state := fitToWidth(styledState(j), c.state)
-	tm := fitToWidth(timeStr, c.tm)
-	start := fitToWidth(clockOrEmpty(j.StartTime), c.start)
-	end := fitToWidth(clockOrEmpty(j.EndTime), c.end)
-	sess := fitToWidth(truncateToWidth(j.Session, c.session), c.session)
-	command := fitToWidth(cmd, c.command)
-	return id + " " + state + " " + tm + " " + start + " " + end + " " + sess + " " + command
+	stateTxt, stateStyle := jobStateText(j)
+	cell := func(text string, w int, style lipgloss.Style) string {
+		if bg != nil {
+			style = style.Background(bg)
+		}
+		return style.Render(fitToWidth(stripAnsi(text), w))
+	}
+	sep := " "
+	if bg != nil {
+		sep = lipgloss.NewStyle().Background(bg).Render(" ")
+	}
+	id := cell(fmt.Sprintf("%*d", c.id, j.ID), c.id, jobIDStyle)
+	state := cell(stateTxt, c.state, stateStyle)
+	tm := cell(timeStr, c.tm, lipgloss.NewStyle())
+	start := cell(clockOrEmpty(j.StartTime), c.start, lipgloss.NewStyle())
+	end := cell(clockOrEmpty(j.EndTime), c.end, lipgloss.NewStyle())
+	sess := cell(j.Session, c.session, lipgloss.NewStyle())
+	command := cell(cmd, c.command, lipgloss.NewStyle())
+	return id + sep + state + sep + tm + sep + start + sep + end + sep + sess + sep + command
+}
+
+// padRowBg extends a highlighted row's background to the full inner width. For
+// unhighlighted rows (bg == nil) it is a no-op — jobsBordered pads those.
+func padRowBg(s string, width int, bg lipgloss.TerminalColor) string {
+	if bg == nil {
+		return s
+	}
+	if w := lipgloss.Width(s); w < width {
+		return s + lipgloss.NewStyle().Background(bg).Render(strings.Repeat(" ", width-w))
+	}
+	return s
 }
 
 // clockOrEmpty renders a timestamp as HH:MM:SS, or blank if unset.
@@ -383,6 +541,10 @@ func (m model) handleJobsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handlePagerKey(msg)
 	}
 
+	if m.jobs.form.active {
+		return m.handleSessionFormKey(msg)
+	}
+
 	if m.jobs.confirm.kind != confirmNone {
 		c := m.jobs.confirm
 		m.jobs.confirm = confirmState{}
@@ -392,6 +554,10 @@ func (m model) handleJobsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, removeJobs(c.ids)
 			case confirmClear:
 				return m, clearFinishedCmd()
+			case confirmDeleteSession:
+				return m, deleteSession(c.session)
+			case confirmDeleteGroup:
+				return m, deleteGroup(c.group)
 			}
 		}
 		return m, nil
@@ -436,17 +602,9 @@ func (m model) handleJobsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.jobs.visual = false
 			return m, nil
 		}
-		if m.jobsOnly {
-			return m, tea.Quit
-		}
-		m.viewMode = viewSplit
-		return m, clearScreenCmd()
+		return m.leaveManagement()
 	case "q":
-		if m.jobsOnly {
-			return m, tea.Quit
-		}
-		m.viewMode = viewSplit
-		return m, clearScreenCmd()
+		return m.leaveManagement()
 	case "j", "down", " ":
 		(&m).jobsMove(1)
 	case "k", "up":
@@ -459,21 +617,28 @@ func (m model) handleJobsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		(&m).jobsGoto(len(m.jobs.rows) - 1)
 	case "g":
 		return m.startPending('g')
+	case "l", "right":
+		return m.expandRow(true)
+	case "h", "left":
+		return m.expandRow(false)
 	case "V":
 		if m.jobs.visual {
 			m.jobs.visual = false
-		} else if len(m.jobs.rows) > 0 {
+		} else if _, ok := m.jobsSelected(); ok {
 			m.jobs.visual = true
 			m.jobs.anchor = m.jobs.cursor
 		}
-	case "a":
-		m.jobs.scopeAll = !m.jobs.scopeAll
-		m.refreshJobsRows()
 	case "/":
 		m.jobs.filtering = true
 		m.textInput.SetValue(m.jobs.filter)
 		m.textInput.Focus()
 		return m, textinput.Blink
+	case "e":
+		if r, ok := m.jobsCursorRow(); ok && r.kind == rowSession {
+			return m.openSessionForm(false, r.session, r.group), textinput.Blink
+		}
+	case "n":
+		return m.openSessionForm(true, "", ""), textinput.Blink
 	case "x":
 		if ids := m.jobsActionIDs(); len(ids) > 0 {
 			m.jobs.visual = false
@@ -485,17 +650,32 @@ func (m model) handleJobsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, makeUrgentJobs(ids)
 		}
 	case "r":
+		// On a session row, reset that session's shell; on job rows, rerun.
+		if r, ok := m.jobsCursorRow(); ok && r.kind == rowSession && !m.jobs.visual {
+			nm, cmd := m.resetSessionShell(r.session)
+			return nm, cmd
+		}
 		if ids := m.jobsActionIDs(); len(ids) > 0 {
 			m.jobs.visual = false
 			return m, rerunJobs(ids)
 		}
 	case "d":
+		// Session/group rows delete the container (with confirmation); job rows
+		// remove jobs (finished ones without a prompt).
+		if r, ok := m.jobsCursorRow(); ok && !m.jobs.visual {
+			switch r.kind {
+			case rowSession:
+				m.jobs.confirm = confirmState{kind: confirmDeleteSession, session: r.session}
+				return m, nil
+			case rowGroup:
+				m.jobs.confirm = confirmState{kind: confirmDeleteGroup, group: r.group}
+				return m, nil
+			}
+		}
 		ids := m.jobsActionIDs()
 		if len(ids) == 0 {
 			return m, nil
 		}
-		// Finished jobs are inert, so remove them straight away; anything
-		// still queued or running gets a confirmation prompt first.
 		allFinished := m.actionAllFinished()
 		m.jobs.visual = false
 		if allFinished {
@@ -510,10 +690,105 @@ func (m model) handleJobsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "C":
 		m.jobs.confirm = confirmState{kind: confirmClear}
 	case "enter", "o":
-		if j, ok := m.jobsSelected(); ok {
-			return m, openPagerCmd(j)
+		return m.activateRow()
+	}
+	return m, nil
+}
+
+// mgmtBodyTopLine is the terminal row (0-based) where the first list row is
+// drawn: after the top border, summary line, and column header.
+func (m model) mgmtBodyTopLine() int { return 3 }
+
+// handleMouse maps clicks and wheel scrolls on the management screen to row
+// selection/activation. Mouse events are only captured while this screen shows.
+func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if m.viewMode != viewJobs || m.jobs.mode != jobsTable || m.jobs.form.active || m.jobs.filtering {
+		return m, nil
+	}
+	if msg.Action != tea.MouseActionPress {
+		return m, nil
+	}
+	switch msg.Button {
+	case tea.MouseButtonWheelUp:
+		(&m).jobsMove(-1)
+		return m, nil
+	case tea.MouseButtonWheelDown:
+		(&m).jobsMove(1)
+		return m, nil
+	case tea.MouseButtonLeft:
+		top := m.mgmtBodyTopLine()
+		if msg.Y < top || msg.Y >= top+m.jobsBodyHeight() {
+			return m, nil
+		}
+		idx := m.jobs.offset + (msg.Y - top)
+		if idx < 0 || idx >= len(m.jobs.rows) {
+			return m, nil
+		}
+		m.jobs.cursor = idx
+		m.jobs.cursorKey = rowKey(m.jobs.rows[idx])
+		m.jobs.offset = clampOffset(idx, m.jobs.offset, m.jobsBodyHeight(), len(m.jobs.rows))
+		return m.activateRow()
+	}
+	return m, nil
+}
+
+// leaveManagement exits the management view: back to the active session's split
+// view, or quits when launched with --jobs or when no session is open.
+func (m model) leaveManagement() (tea.Model, tea.Cmd) {
+	if m.jobsOnly || m.activeSession == "" || m.activeRoot() == nil {
+		return m, tea.Quit
+	}
+	m.viewMode = viewSplit
+	m.mouseOn = false
+	return m, tea.Batch(clearScreenCmd(), tea.DisableMouse)
+}
+
+// activateRow acts on the cursor row: groups/sessions toggle or open, jobs open
+// the output pager.
+func (m model) activateRow() (tea.Model, tea.Cmd) {
+	r, ok := m.jobsCursorRow()
+	if !ok {
+		return m, nil
+	}
+	switch r.kind {
+	case rowGroup:
+		m.nodes[r.nodeIdx].expanded = !m.nodes[r.nodeIdx].expanded
+		m.refreshJobsRows()
+		return m, nil
+	case rowSession:
+		return m.openSession(r.session)
+	default: // rowJob
+		return m, openPagerCmd(r.job)
+	}
+}
+
+// openSession leaves the management view and activates the given session,
+// building or restoring its terminal panes.
+func (m model) openSession(name string) (tea.Model, tea.Cmd) {
+	m.viewMode = viewSplit
+	m.mouseOn = false
+	nm, cmd := m.activateSession(name)
+	return nm, tea.Batch(cmd, tea.DisableMouse)
+}
+
+// expandRow opens or closes the group/session under the cursor. Collapsing a
+// job row folds its parent session.
+func (m model) expandRow(open bool) (tea.Model, tea.Cmd) {
+	r, ok := m.jobsCursorRow()
+	if !ok {
+		return m, nil
+	}
+	switch r.kind {
+	case rowGroup:
+		m.nodes[r.nodeIdx].expanded = open
+	case rowSession:
+		m.sessionExpanded[r.session] = open
+	case rowJob:
+		if !open {
+			m.sessionExpanded[r.session] = false
 		}
 	}
+	m.refreshJobsRows()
 	return m, nil
 }
 
@@ -522,6 +797,76 @@ func (m model) startPending(op byte) (tea.Model, tea.Cmd) {
 	m.jobs.pendingTimer++
 	id := m.jobs.pendingTimer
 	return m, tea.Tick(500*time.Millisecond, func(time.Time) tea.Msg { return jobsGTimeoutMsg{id: id} })
+}
+
+// openSessionForm shows the create/edit session modal, pre-filled when editing.
+func (m model) openSessionForm(creating bool, name, group string) model {
+	ni := textinput.New()
+	ni.CharLimit = 64
+	ni.Prompt = ""
+	ni.SetValue(name)
+	ni.Focus()
+	gi := textinput.New()
+	gi.CharLimit = 64
+	gi.Prompt = ""
+	gi.SetValue(group)
+	m.jobs.form = sessionForm{
+		active:     true,
+		creating:   creating,
+		origName:   name,
+		origGroup:  group,
+		nameInput:  ni,
+		groupInput: gi,
+		focusField: 0,
+	}
+	return m
+}
+
+func (m model) handleSessionFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	f := &m.jobs.form
+	switch msg.String() {
+	case "esc":
+		m.jobs.form = sessionForm{}
+		return m, nil
+	case "tab", "shift+tab", "up", "down":
+		f.focusField = 1 - f.focusField
+		if f.focusField == 0 {
+			f.nameInput.Focus()
+			f.groupInput.Blur()
+		} else {
+			f.groupInput.Focus()
+			f.nameInput.Blur()
+		}
+		return m, textinput.Blink
+	case "enter":
+		return m.submitSessionForm()
+	}
+	var cmd tea.Cmd
+	if f.focusField == 0 {
+		f.nameInput, cmd = f.nameInput.Update(msg)
+	} else {
+		f.groupInput, cmd = f.groupInput.Update(msg)
+	}
+	return m, cmd
+}
+
+func (m model) submitSessionForm() (tea.Model, tea.Cmd) {
+	f := m.jobs.form
+	name := strings.TrimSpace(f.nameInput.Value())
+	group := strings.TrimSpace(f.groupInput.Value())
+	creating := f.creating
+	m.jobs.form = sessionForm{}
+	if name == "" {
+		m.status = "session name required"
+		return m, nil
+	}
+	if creating {
+		return m, createSessionInGroup(name, group)
+	}
+	if name == f.origName && group == f.origGroup {
+		return m, nil
+	}
+	return m, editSession(f.origName, name, f.origGroup, group)
 }
 
 func (m *model) jobsGoto(idx int) {
@@ -536,19 +881,19 @@ func (m *model) jobsGoto(idx int) {
 		idx = n - 1
 	}
 	m.jobs.cursor = idx
-	m.jobs.cursorID = m.jobs.rows[idx].ID
+	m.jobs.cursorKey = rowKey(m.jobs.rows[idx])
 	m.jobs.offset = clampOffset(idx, m.jobs.offset, m.jobsBodyHeight(), n)
 }
 
 // jobsActionRows returns the job rows an action applies to: the visual
-// selection when active, otherwise just the cursor row.
+// selection when active (job rows only), otherwise just the cursor job row.
 func (m model) jobsActionRows() []protocol.JobInfo {
 	if m.jobs.visual {
 		lo, hi := m.visualRange()
 		var rows []protocol.JobInfo
 		for i := lo; i <= hi && i < len(m.jobs.rows); i++ {
-			if i >= 0 {
-				rows = append(rows, m.jobs.rows[i])
+			if i >= 0 && m.jobs.rows[i].kind == rowJob {
+				rows = append(rows, m.jobs.rows[i].job)
 			}
 		}
 		return rows
@@ -636,7 +981,7 @@ func (m *model) jobsMove(delta int) {
 	if m.jobs.cursor >= n {
 		m.jobs.cursor = n - 1
 	}
-	m.jobs.cursorID = m.jobs.rows[m.jobs.cursor].ID
+	m.jobs.cursorKey = rowKey(m.jobs.rows[m.jobs.cursor])
 	m.jobs.offset = clampOffset(m.jobs.cursor, m.jobs.offset, m.jobsBodyHeight(), n)
 }
 
@@ -837,42 +1182,13 @@ func (m model) renderJobsView(w, h int) string {
 	bodyH := m.jobsBodyHeight()
 	lines := make([]string, 0, h)
 
-	scope := "all"
-	if !m.jobs.scopeAll {
-		scope = "session:" + m.activeSession
-	}
-	lines = append(lines, boxedTop(w, " jobs ", focusBorderStyle))
-	lines = append(lines, m.jobsBordered(m.jobsSummaryLine(inner, scope), inner))
+	lines = append(lines, boxedTop(w, " jobs & sessions ", focusBorderStyle))
+	lines = append(lines, m.jobsBordered(m.jobsSummaryLine(inner), inner))
 	lines = append(lines, m.jobsBordered(jobsHeaderStyle.Render(fitToWidth(jobsHeaderRow(cols), inner)), inner))
 
-	if len(m.jobs.rows) == 0 {
-		for i := 0; i < bodyH; i++ {
-			if i == bodyH/2 {
-				lines = append(lines, m.jobsBordered(treeEmptyStyle.Render(centerText("(no jobs)", inner)), inner))
-			} else {
-				lines = append(lines, m.jobsBordered("", inner))
-			}
-		}
-	} else {
-		for i := 0; i < bodyH; i++ {
-			idx := m.jobs.offset + i
-			if idx >= len(m.jobs.rows) {
-				lines = append(lines, m.jobsBordered("", inner))
-				continue
-			}
-			row := formatJobRow(m.jobs.rows[idx], cols)
-			selLo, selHi := -1, -1
-			if m.jobs.visual {
-				selLo, selHi = m.visualRange()
-			}
-			switch {
-			case idx == m.jobs.cursor:
-				row = cursorStyle.Render(fitToWidth(stripAnsi(row), inner))
-			case idx >= selLo && idx <= selHi:
-				row = selectedStyle.Render(fitToWidth(stripAnsi(row), inner))
-			}
-			lines = append(lines, m.jobsBordered(row, inner))
-		}
+	body := m.mgmtBodyLines(bodyH, inner, cols)
+	for _, bl := range body {
+		lines = append(lines, m.jobsBordered(bl, inner))
 	}
 
 	for _, dl := range m.jobsDetailLines(jobsDetailHeight, inner) {
@@ -887,6 +1203,130 @@ func (m model) renderJobsView(w, h int) string {
 	lines = append(lines, m.renderHWBar(w))
 
 	return joinExact(lines, w, h)
+}
+
+// mgmtBodyLines renders the visible window of the group→session→job list (or the
+// edit-form overlay when active), returning exactly bodyH lines of width inner.
+func (m model) mgmtBodyLines(bodyH, inner int, cols columnWidths) []string {
+	if m.jobs.form.active {
+		return m.sessionFormLines(bodyH, inner)
+	}
+	out := make([]string, 0, bodyH)
+	if len(m.jobs.rows) == 0 {
+		for i := 0; i < bodyH; i++ {
+			if i == bodyH/2 {
+				out = append(out, treeEmptyStyle.Render(centerText("(no sessions)", inner)))
+			} else {
+				out = append(out, "")
+			}
+		}
+		return out
+	}
+	selLo, selHi := -1, -1
+	if m.jobs.visual {
+		selLo, selHi = m.visualRange()
+	}
+	for i := 0; i < bodyH; i++ {
+		idx := m.jobs.offset + i
+		if idx >= len(m.jobs.rows) {
+			out = append(out, "")
+			continue
+		}
+		r := m.jobs.rows[idx]
+		isCursor := idx == m.jobs.cursor
+		inSel := m.jobs.visual && r.kind == rowJob && idx >= selLo && idx <= selHi
+		out = append(out, m.renderMgmtRow(r, cols, inner, isCursor, inSel))
+	}
+	return out
+}
+
+// renderMgmtRow renders one management-list row with the right highlight. Job
+// rows keep their per-column semantic colors under the focus tint; group and
+// session headers are free-form lines.
+func (m model) renderMgmtRow(r mgmtRow, cols columnWidths, inner int, isCursor, inSel bool) string {
+	if r.kind == rowJob {
+		switch {
+		case isCursor:
+			return padRowBg(renderJobsRow(r.job, cols, cRowFocusBg), inner, cRowFocusBg)
+		case inSel:
+			return selectedStyle.Render(fitToWidth(stripAnsi(formatJobRow(r.job, cols)), inner))
+		default:
+			return formatJobRow(r.job, cols)
+		}
+	}
+	content := m.mgmtHeaderLine(r)
+	if isCursor {
+		return lipgloss.NewStyle().Background(cRowFocusBg).Render(fitToWidth(stripAnsi(content), inner))
+	}
+	return content
+}
+
+// mgmtHeaderLine formats a group or session header row.
+func (m model) mgmtHeaderLine(r mgmtRow) string {
+	node := m.nodes[r.nodeIdx]
+	if r.kind == rowGroup {
+		icon := "▸"
+		if node.expanded {
+			icon = "▾"
+		}
+		return fmt.Sprintf(" %s  %s  %s",
+			treeIconStyle.Render(icon),
+			groupStyle.Render(node.group),
+			treeSummaryStyle.Render(groupSummary(node)))
+	}
+	session := node.sessions[r.sessionIdx]
+	caret := "▸"
+	if m.sessionExpanded[session.Name] {
+		caret = "▾"
+	}
+	marker := ""
+	if session.Name == m.activeSession && m.activeSession != "" {
+		marker = runningStyle.Render(" ● open")
+	}
+	return fmt.Sprintf("   %s %s  %s%s",
+		treeIconStyle.Render(caret),
+		sessionStyle.Render(session.Name),
+		treeSummaryStyle.Render(sessionSummary(node.jobs[session.Name])),
+		marker)
+}
+
+// sessionFormLines renders the create/edit-session modal centered in the body.
+func (m model) sessionFormLines(bodyH, inner int) []string {
+	f := m.jobs.form
+	title := " edit session "
+	if f.creating {
+		title = " new session "
+	}
+	field := func(label string, ti textinput.Model, focused bool) string {
+		box := ti.View()
+		lbl := jobsDetailKeyStyle.Render(label)
+		if focused {
+			lbl = cursorStyle.Render(label)
+		}
+		return truncateToWidth("  "+lbl+" "+box, inner)
+	}
+	content := []string{
+		jobsDetailRuleStyle.Render(fitToWidth("── "+strings.TrimSpace(title)+" ", inner)),
+		"",
+		field("name: ", f.nameInput, f.focusField == 0),
+		field("group:", f.groupInput, f.focusField == 1),
+		"",
+		treeEmptyStyle.Render(centerText("tab: switch field · enter: save · esc: cancel", inner)),
+	}
+	out := make([]string, 0, bodyH)
+	top := (bodyH - len(content)) / 2
+	if top < 0 {
+		top = 0
+	}
+	for i := 0; i < bodyH; i++ {
+		ci := i - top
+		if ci >= 0 && ci < len(content) {
+			out = append(out, content[ci])
+		} else {
+			out = append(out, "")
+		}
+	}
+	return out
 }
 
 // renderHWBar is the system-wide hardware status bar shown at the bottom of the
@@ -971,11 +1411,15 @@ func (m model) jobsBordered(content string, inner int) string {
 	return b + fitToWidth(content, inner) + b
 }
 
-func (m model) jobsSummaryLine(inner int, scope string) string {
-	running, queued, finished, failed := jobStateCounts(m.jobs.rows)
+func (m model) jobsSummaryLine(inner int) string {
+	jobs := m.visibleJobs()
+	running, queued, finished, failed := jobStateCounts(jobs)
+	sessions := 0
+	for _, n := range m.nodes {
+		sessions += len(n.sessions)
+	}
 	parts := []string{
-		fmt.Sprintf("scope %s", scope),
-		fmt.Sprintf("visible %d", len(m.jobs.rows)),
+		fmt.Sprintf("sessions %d", sessions),
 		fmt.Sprintf("running %d", running),
 		fmt.Sprintf("queued %d", queued),
 		fmt.Sprintf("done %d", finished),
@@ -1011,10 +1455,12 @@ func jobStateCounts(jobs []protocol.JobInfo) (running, queued, finished, failed 
 
 func (m model) jobsDetailLines(maxLines, inner int) []string {
 	out := make([]string, 0, maxLines)
+	rule := func(title string) {
+		r := title + strings.Repeat("─", max(0, inner-lipgloss.Width(title)))
+		out = append(out, jobsDetailRuleStyle.Render(fitToWidth(r, inner)))
+	}
 	if j, ok := m.jobsSelected(); ok {
-		title := " details "
-		rule := title + strings.Repeat("─", max(0, inner-lipgloss.Width(title)))
-		out = append(out, jobsDetailRuleStyle.Render(fitToWidth(rule, inner)))
+		rule(" job details ")
 		info := strings.Split(strings.TrimRight(format.FormatJobInfo(&j), "\n"), "\n")
 		for _, il := range info {
 			if len(out) >= maxLines {
@@ -1022,6 +1468,20 @@ func (m model) jobsDetailLines(maxLines, inner int) []string {
 			}
 			out = append(out, styleJobDetailLine(il, inner))
 		}
+	} else if r, ok := m.jobsCursorRow(); ok && r.kind == rowSession {
+		rule(" session ")
+		node := m.nodes[r.nodeIdx]
+		jobs := node.jobs[r.session]
+		running, queued, finished := jobCounts(jobs)
+		out = append(out, styleJobDetailLine(fmt.Sprintf("name: %s", r.session), inner))
+		out = append(out, styleJobDetailLine(fmt.Sprintf("group: %s", node.group), inner))
+		out = append(out, styleJobDetailLine(fmt.Sprintf("jobs: %d  running %d  queued %d  done %d", len(jobs), running, queued, finished), inner))
+		out = append(out, styleJobDetailLine("open: enter · edit: e · delete: d", inner))
+	} else if r, ok := m.jobsCursorRow(); ok && r.kind == rowGroup {
+		rule(" group ")
+		node := m.nodes[r.nodeIdx]
+		out = append(out, styleJobDetailLine(fmt.Sprintf("name: %s", node.group), inner))
+		out = append(out, styleJobDetailLine(groupSummary(node), inner))
 	}
 	for len(out) < maxLines {
 		out = append(out, "")
@@ -1040,35 +1500,51 @@ func styleJobDetailLine(line string, inner int) string {
 
 func (m model) jobsFooter(w int) string {
 	if m.jobs.confirm.kind != confirmNone {
-		q := " clear all finished jobs? (y/n) "
-		if m.jobs.confirm.kind == confirmRemove {
+		var q string
+		switch m.jobs.confirm.kind {
+		case confirmRemove:
 			if n := len(m.jobs.confirm.ids); n == 1 {
 				q = fmt.Sprintf(" remove job %d? (y/n) ", m.jobs.confirm.ids[0])
 			} else {
 				q = fmt.Sprintf(" remove %d jobs? (y/n) ", n)
 			}
+		case confirmDeleteSession:
+			q = fmt.Sprintf(" delete session %q? (y/n) ", m.jobs.confirm.session)
+		case confirmDeleteGroup:
+			q = fmt.Sprintf(" delete group %q? (y/n) ", m.jobs.confirm.group)
+		default:
+			q = " clear all finished jobs? (y/n) "
 		}
 		return renderAirline(w, []statusSegment{
 			{text: " CONFIRM ", style: airlineError},
 			{text: q, style: airlineInfo},
 		}, nil)
 	}
-	running, queued, finished, failed := jobStateCounts(m.jobs.rows)
-	modeText, modeStyle := " JOBS ", modeCommandStyle
+	running, queued, finished, failed := jobStateCounts(m.visibleJobs())
+	modeText, modeStyle := " MANAGE ", modeCommandStyle
 	if m.jobs.visual {
 		lo, hi := m.visualRange()
 		modeText, modeStyle = fmt.Sprintf(" VISUAL %d ", hi-lo+1), modeInsertStyle
 	}
 	left := []statusSegment{
 		{text: modeText, style: modeStyle},
-		{text: fmt.Sprintf(" %d jobs ", len(m.jobs.rows)), style: airlineFocus},
+	}
+	if r, ok := m.jobsCursorRow(); ok {
+		switch r.kind {
+		case rowGroup:
+			left = append(left, statusSegment{text: " group ", style: airlineFocus})
+		case rowSession:
+			left = append(left, statusSegment{text: " session ", style: airlineFocus})
+		default:
+			left = append(left, statusSegment{text: " job ", style: airlineFocus})
+		}
 	}
 	if m.jobs.filter != "" {
 		left = append(left, statusSegment{text: fmt.Sprintf(" /%s ", m.jobs.filter), style: airlineInfo})
 	}
 	right := []statusSegment{
 		{text: fmt.Sprintf(" run %d  queue %d  done %d  fail %d ", running, queued, finished, failed), style: airlineMuted},
-		{text: " j/k gg G V / o r d x u D q ", style: airlineFocus},
+		{text: " j/k h/l ⏎:open e:edit n:new / x d q ", style: airlineFocus},
 	}
 	return renderAirline(w, left, right)
 }

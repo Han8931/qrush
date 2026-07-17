@@ -38,13 +38,23 @@ func TestJobsQuitJobsOnly(t *testing.T) {
 }
 
 func TestJobsQuitDropsToSplit(t *testing.T) {
-	m := model{viewMode: viewJobs}
+	// With a session open, q drops back to that session's split view.
+	m := model{viewMode: viewJobs, activeSession: "default", layouts: map[string]*paneNode{"default": {}}}
 	got, cmd := m.handleJobsKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
 	if quitsOn(t, cmd) {
-		t.Fatal("q without jobsOnly should not quit the program")
+		t.Fatal("q with an open session should not quit the program")
 	}
 	if fm := got.(model); fm.viewMode != viewSplit {
 		t.Errorf("q should drop to viewSplit, got viewMode=%d", fm.viewMode)
+	}
+}
+
+func TestJobsQuitNoSessionQuits(t *testing.T) {
+	// On the home screen with no session open, q exits the program.
+	m := model{viewMode: viewJobs}
+	_, cmd := m.handleJobsKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	if !quitsOn(t, cmd) {
+		t.Fatal("q with no open session should quit the program")
 	}
 }
 
@@ -52,13 +62,22 @@ func runeKey(r string) tea.KeyMsg {
 	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(r)}
 }
 
-// modelWithRows builds a jobs-table model positioned on the given row.
-func modelWithRows(rows []protocol.JobInfo, cursor int) model {
+// jobRows wraps plain jobs as management job-rows for tests.
+func jobRows(jobs []protocol.JobInfo) []mgmtRow {
+	rows := make([]mgmtRow, len(jobs))
+	for i, j := range jobs {
+		rows[i] = mgmtRow{kind: rowJob, job: j, session: j.Session}
+	}
+	return rows
+}
+
+// modelWithRows builds a management-view model positioned on the given job row.
+func modelWithRows(jobs []protocol.JobInfo, cursor int) model {
 	m := model{viewMode: viewJobs}
-	m.jobs.rows = rows
+	m.jobs.rows = jobRows(jobs)
 	m.jobs.cursor = cursor
-	if cursor >= 0 && cursor < len(rows) {
-		m.jobs.cursorID = rows[cursor].ID
+	if cursor >= 0 && cursor < len(m.jobs.rows) {
+		m.jobs.cursorKey = rowKey(m.jobs.rows[cursor])
 	}
 	return m
 }
@@ -391,7 +410,7 @@ func TestFindMatches(t *testing.T) {
 
 func TestJobsActionIDs(t *testing.T) {
 	var m model
-	m.jobs.rows = sortJobs(jobsFixture()) // IDs 1,2,3
+	m.jobs.rows = jobRows(sortJobs(jobsFixture())) // IDs 1,2,3
 	m.jobs.cursor = 1
 
 	// no visual selection -> just the cursor row

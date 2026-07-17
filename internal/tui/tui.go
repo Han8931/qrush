@@ -24,37 +24,28 @@ const (
 )
 
 type model struct {
-	width       int
-	height      int
-	treeWidth   int
-	treeVisible bool
-	treeWide    bool
-	focus       pane
+	width  int
+	height int
+	focus  pane
 
-	commaPressed bool
-	commaTimer   int
 	ctrlWPressed bool
 	ctrlWTimer   int
 	ctrlBPressed bool
 	ctrlBTimer   int
-	gPressed     bool
-	gTimer       int
 	nextPaneID   int
 
-	nodes         []treeNode
-	cursor        int
-	selected      map[string]bool
-	maxSlots      int
-	err           error
-	status        string
-	inputMode     inputKind
-	textInput     textinput.Model
-	cmdInput      textinput.Model
-	renameOld     string
-	renameGroup   bool
-	createGroup   bool
-	createInGroup string
-	moveSession   string
+	nodes []treeNode
+	// sessionExpanded tracks, by session name, whether the management view
+	// shows that session's jobs nested beneath it. Group-level expansion lives
+	// on treeNode.expanded; sessions need their own flag because the protocol
+	// SessionInfo type can't carry UI state.
+	sessionExpanded map[string]bool
+	maxSlots        int
+	err             error
+	status          string
+	inputMode       inputKind
+	textInput       textinput.Model
+	cmdInput        textinput.Model
 
 	// layouts holds each session's split-layout tree (tmux-style tiling).
 	// panes is a flat id→shell registry used for PTY event routing. shell and
@@ -80,6 +71,11 @@ type model struct {
 	// status bar; hwStats holds the latest snapshot.
 	hwMon   *sysmon.Monitor
 	hwStats sysmon.Stats
+
+	// mouseOn tracks whether terminal mouse reporting is currently enabled. It
+	// is turned on only while the management view is showing so terminal panes
+	// keep their native text selection.
+	mouseOn bool
 }
 
 func firstLeaf(root *paneNode) *paneNode {
@@ -154,19 +150,18 @@ func newModel(sh *shellState) model {
 		layouts[activeSession] = focusPane
 	}
 	return model{
-		textInput:     ti,
-		cmdInput:      ci,
-		treeVisible:   true,
-		focus:         paneTerm,
-		selected:      make(map[string]bool),
-		layouts:       layouts,
-		panes:         panes,
-		focusPane:     focusPane,
-		nextPaneID:    nextPaneID,
-		shell:         sh,
-		activeSession: activeSession,
-		gitBranch:     currentGitBranch(),
-		hwMon:         sysmon.New(),
+		textInput:       ti,
+		cmdInput:        ci,
+		focus:           paneTerm,
+		sessionExpanded: make(map[string]bool),
+		layouts:         layouts,
+		panes:           panes,
+		focusPane:       focusPane,
+		nextPaneID:      nextPaneID,
+		shell:           sh,
+		activeSession:   activeSession,
+		gitBranch:       currentGitBranch(),
+		hwMon:           sysmon.New(),
 	}
 }
 
@@ -218,9 +213,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.treeWidth = computeTreeWidth(m.width, m.treeWide)
 		m.resizeShell()
-		return m, clearScreenCmd()
+		cmds := []tea.Cmd{clearScreenCmd()}
+		// Enable mouse capture the first time we know the size while on the
+		// management screen (enabling from Init is unreliable).
+		if m.viewMode == viewJobs && !m.mouseOn {
+			m.mouseOn = true
+			cmds = append(cmds, tea.EnableMouseCellMotion)
+		}
+		return m, tea.Batch(cmds...)
 
 	case treeDataMsg:
 		if msg.err != nil {
@@ -239,17 +240,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.maxSlots = msg.maxSlots
-		total := totalRows(m.nodes)
-		if m.cursor >= total && total > 0 {
-			m.cursor = total - 1
-		}
-		m.pruneSelection()
+		m.pruneSessionExpanded()
 		// Another client (`ru --jobs` from inside a pane) asked us to open the
 		// jobs view. Honour it only from the split view so we don't disturb a
 		// pager or an already-open table.
 		if msg.openJobsView && m.viewMode == viewSplit {
-			m = m.openJobsView()
-			return m, tea.Batch(clearScreenCmd(), sampleHWCmd(m.hwMon))
+			m, mouseCmd := m.openJobsView()
+			return m, tea.Batch(clearScreenCmd(), sampleHWCmd(m.hwMon), mouseCmd)
 		}
 		if m.viewMode == viewJobs {
 			m.jobs.allJobs = msg.jobs
@@ -290,15 +287,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case shellExitMsg:
 		return m.handleShellExit(msg.id)
 
-	case commaTimeoutMsg:
-		if msg.id == m.commaTimer && m.commaPressed {
-			m.commaPressed = false
-			if m.focus == paneTerm && m.shell != nil {
-				m.shell.write([]byte(","))
-			}
-		}
-		return m, nil
-
 	case ctrlWTimeoutMsg:
 		if msg.id == m.ctrlWTimer && m.ctrlWPressed {
 			m.ctrlWPressed = false
@@ -309,12 +297,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case ctrlBTimeoutMsg:
-		return m, nil
-
-	case gTimeoutMsg:
-		if msg.id == m.gTimer && m.gPressed {
-			m.gPressed = false
-		}
 		return m, nil
 
 	case jobsGTimeoutMsg:
@@ -331,15 +313,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, fetchTreeData
 
+	case tea.MouseMsg:
+		return m.handleMouse(msg)
+
 	case tea.KeyMsg:
 		if m.viewMode == viewJobs {
 			return m.handleJobsKey(msg)
 		}
 		if m.inputMode == inputCommand {
 			return m.handleCommandKey(msg)
-		}
-		if m.inputMode != inputNone && m.focus == paneTree {
-			return m.handleInputKey(msg)
 		}
 		var handled bool
 		var cmd tea.Cmd
@@ -351,57 +333,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if handled {
 			return m, cmd
 		}
-		m, handled, cmd = m.handleCommaN(msg)
-		if handled {
-			return m, cmd
-		}
-		switch m.focus {
-		case paneTree:
-			return m.handleTreeKey(msg)
-		case paneTerm:
-			return m.handleTermKey(msg)
-		}
+		return m.handleTermKey(msg)
 	}
 	return m, nil
-}
-
-func (m model) handleCommaN(msg tea.KeyMsg) (model, bool, tea.Cmd) {
-	// Don't intercept commas when the user is typing in a full-screen TUI
-	// program (vim/nano/etc.) so commit messages, search text, etc. pass
-	// through cleanly.
-	if m.focus == paneTerm && m.shell != nil && m.shell.inAltScreen() {
-		return m, false, nil
-	}
-
-	key := msg.String()
-
-	if m.commaPressed {
-		m.commaPressed = false
-		if key == "n" {
-			m.treeVisible = !m.treeVisible
-			if !m.treeVisible && m.focus == paneTree {
-				m.focus = paneTerm
-			}
-			m.treeWidth = computeTreeWidth(m.width, m.treeWide)
-			m.resizeShell()
-			return m, true, nil
-		}
-		if m.focus == paneTerm && m.shell != nil {
-			m.shell.write([]byte(","))
-		}
-		return m, false, nil
-	}
-
-	if key == "," {
-		m.commaPressed = true
-		m.commaTimer++
-		timerID := m.commaTimer
-		return m, true, tea.Tick(300*time.Millisecond, func(t time.Time) tea.Msg {
-			return commaTimeoutMsg{id: timerID}
-		})
-	}
-
-	return m, false, nil
 }
 
 func (m model) handleCtrlW(msg tea.KeyMsg) (model, bool, tea.Cmd) {
@@ -468,55 +402,29 @@ func (m *model) movePaneFocus(dir splitDir, forward bool) bool {
 	return true
 }
 
-// ctrlWLeft moves to the pane on the left, falling back to the tree when there
-// is no pane there (the tree sits to the left of the terminal region).
+// ctrlWLeft moves to the pane on the left.
 func (m model) ctrlWLeft() model {
-	if m.focus == paneTree {
-		return m
-	}
-	if m.movePaneFocus(splitVert, false) {
-		return m
-	}
-	if m.treeVisible {
-		m.focus = paneTree
-	}
+	m.movePaneFocus(splitVert, false)
 	return m
 }
 
-// ctrlWRight moves into the terminal from the tree, or to the pane on the right.
+// ctrlWRight moves to the pane on the right.
 func (m model) ctrlWRight() model {
-	if m.focus == paneTree {
-		m.focus = paneTerm
-		return m
-	}
 	m.movePaneFocus(splitVert, true)
 	return m
 }
 
-// ctrlWVert moves between vertically stacked panes (or enters the terminal from
-// the tree).
+// ctrlWVert moves between vertically stacked panes.
 func (m model) ctrlWVert(down bool) model {
-	if m.focus == paneTree {
-		m.focus = paneTerm
-		return m
-	}
 	m.movePaneFocus(splitHoriz, down)
 	return m
 }
 
-// ctrlWCycle cycles focus through the tree (if visible) and every pane in turn.
+// ctrlWCycle cycles focus through every pane in turn, wrapping at the end.
 func (m model) ctrlWCycle() model {
 	var leaves []*paneNode
 	if root := m.activeRoot(); root != nil {
 		leaves = root.leaves()
-	}
-	if m.focus == paneTree {
-		if len(leaves) > 0 {
-			m.focus = paneTerm
-			m.focusPane = leaves[0]
-			m.syncFocusShell()
-		}
-		return m
 	}
 	idx := -1
 	for i, lf := range leaves {
@@ -530,10 +438,7 @@ func (m model) ctrlWCycle() model {
 		m.syncFocusShell()
 		return m
 	}
-	// Past the last pane: return to the tree, or wrap to the first pane.
-	if m.treeVisible {
-		m.focus = paneTree
-	} else if len(leaves) > 0 {
+	if len(leaves) > 0 {
 		m.focusPane = leaves[0]
 		m.syncFocusShell()
 	}
@@ -585,8 +490,13 @@ func (m model) handleCtrlB(msg tea.KeyMsg) (model, bool, tea.Cmd) {
 			return nm, true, cmd
 		case "j":
 			// Ctrl+B j opens the job-management view. Pane-down is on Ctrl+B ↓.
-			nm := m.openJobsView()
-			return nm, true, sampleHWCmd(nm.hwMon)
+			nm, mouseCmd := m.openJobsView()
+			return nm, true, tea.Batch(sampleHWCmd(nm.hwMon), mouseCmd)
+		case "d":
+			// Ctrl+B d detaches (tmux-style) back to the management view. The
+			// session's panes stay alive on the daemon.
+			nm, mouseCmd := m.openJobsView()
+			return nm, true, tea.Batch(clearScreenCmd(), sampleHWCmd(nm.hwMon), mouseCmd)
 		}
 		// Not a recognized chord — forward the buffered Ctrl+B to the focused
 		// pane and let the current key flow through normal processing.
@@ -603,201 +513,6 @@ func (m model) handleCtrlB(msg tea.KeyMsg) (model, bool, tea.Cmd) {
 	}
 
 	return m, false, nil
-}
-
-func (m model) handleTreeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if msg.String() == "g" {
-		if m.gPressed {
-			m.gPressed = false
-			m.cursor = 0
-			m.status = ""
-			return m, nil
-		}
-		m.gPressed = true
-		m.gTimer++
-		timerID := m.gTimer
-		return m, tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg {
-			return gTimeoutMsg{id: timerID}
-		})
-	}
-	if m.gPressed {
-		m.gPressed = false
-	}
-
-	action := mapTreeKey(msg)
-	total := totalRows(m.nodes)
-
-	switch action {
-	case keyQuit:
-		if m.shellDone() {
-			return m, tea.Quit
-		}
-		m.focus = paneTerm
-		m.status = ""
-
-	case keyUp:
-		if m.cursor > 0 {
-			m.cursor--
-		}
-		m.status = ""
-
-	case keyDown:
-		if m.cursor < total-1 {
-			m.cursor++
-		}
-		m.status = ""
-
-	case keyBottom:
-		if total > 0 {
-			m.cursor = total - 1
-		}
-		m.status = ""
-
-	case keyToggle:
-		if total == 0 {
-			break
-		}
-		info := rowAt(m.nodes, m.cursor)
-		if info.isGroup {
-			m.nodes[info.nodeIdx].expanded = !m.nodes[info.nodeIdx].expanded
-		} else if info.isSession {
-			session := m.nodes[info.nodeIdx].sessions[info.sessionIdx].Name
-			var cmd tea.Cmd
-			m, cmd = m.activateSession(session)
-			return m, cmd
-		}
-
-	case keySelect:
-		if total == 0 {
-			break
-		}
-		m.toggleSelectedRow(m.cursor)
-		if m.cursor < total-1 {
-			m.cursor++
-		}
-
-	case keySelectAll:
-		m.toggleSelectAllVisible()
-
-	case keyCollapse:
-		if total == 0 {
-			break
-		}
-		info := rowAt(m.nodes, m.cursor)
-		if info.isSession {
-			m.cursor = parentGroupRow(m.nodes, m.cursor)
-		} else {
-			m.nodes[info.nodeIdx].expanded = false
-		}
-
-	case keyExpandTree:
-		m.treeWide = !m.treeWide
-		m.treeWidth = computeTreeWidth(m.width, m.treeWide)
-		m.resizeShell()
-		return m, clearScreenCmd()
-
-	case keyCreateSession:
-		m.inputMode = inputCreate
-		m.createGroup = false
-		m.createInGroup = m.selectedGroup()
-		m.textInput.SetValue("")
-		m.textInput.Placeholder = "session name"
-		m.textInput.Focus()
-		m.resizeShell()
-		return m, textinput.Blink
-
-	case keyCreateGroup:
-		m.inputMode = inputCreate
-		m.createGroup = true
-		m.createInGroup = ""
-		m.textInput.SetValue("")
-		m.textInput.Placeholder = "group name"
-		m.textInput.Focus()
-		m.resizeShell()
-		return m, textinput.Blink
-
-	case keyDeleteSession:
-		if len(m.selected) > 0 {
-			targets := m.selectedTargets()
-			m.selected = make(map[string]bool)
-			return m, deleteSelected(targets)
-		}
-		if total == 0 {
-			break
-		}
-		info := rowAt(m.nodes, m.cursor)
-		if info.isSession {
-			name := m.nodes[info.nodeIdx].sessions[info.sessionIdx].Name
-			return m, deleteSession(name)
-		}
-		if info.isGroup {
-			name := m.nodes[info.nodeIdx].group
-			return m, deleteGroup(name)
-		}
-
-	case keyRenameSession:
-		if total == 0 {
-			break
-		}
-		info := rowAt(m.nodes, m.cursor)
-		if info.isSession {
-			name := m.nodes[info.nodeIdx].sessions[info.sessionIdx].Name
-			m.inputMode = inputRename
-			m.renameGroup = false
-			m.renameOld = name
-			m.textInput.SetValue(name)
-			m.textInput.Placeholder = "new name"
-			m.textInput.Focus()
-			m.resizeShell()
-			return m, textinput.Blink
-		}
-		if info.isGroup {
-			name := m.nodes[info.nodeIdx].group
-			m.inputMode = inputRename
-			m.renameGroup = true
-			m.renameOld = name
-			m.textInput.SetValue(name)
-			m.textInput.Placeholder = "new name"
-			m.textInput.Focus()
-			m.resizeShell()
-			return m, textinput.Blink
-		}
-
-	case keyMoveSession:
-		if total == 0 {
-			break
-		}
-		info := rowAt(m.nodes, m.cursor)
-		if info.isSession {
-			m.inputMode = inputMove
-			m.moveSession = m.nodes[info.nodeIdx].sessions[info.sessionIdx].Name
-			m.textInput.SetValue(m.nodes[info.nodeIdx].group)
-			m.textInput.Placeholder = "group name"
-			m.textInput.Focus()
-			m.resizeShell()
-			return m, textinput.Blink
-		}
-	case keyRemoveJob:
-		if len(m.selected) > 0 {
-			var cmd tea.Cmd
-			m, cmd = m.resetSelectedShells(m.selectedTargets())
-			return m, cmd
-		}
-		if total == 0 {
-			break
-		}
-		info := rowAt(m.nodes, m.cursor)
-		if info.isSession {
-			session := m.nodes[info.nodeIdx].sessions[info.sessionIdx].Name
-			var cmd tea.Cmd
-			m, cmd = m.resetSessionShell(session)
-			return m, cmd
-		}
-		if info.isGroup {
-			m.status = "select a session to reset"
-		}
-	}
-	return m, nil
 }
 
 // buildSession restores a session's panes from the daemon — reattaching every
@@ -1031,106 +746,22 @@ func (m model) focusDirPane(dir splitDir, forward bool) (model, tea.Cmd) {
 	return m, nil
 }
 
-type selectedTargets struct {
-	groups   []string
-	sessions []string
-}
-
-func (m model) selectedTargets() selectedTargets {
-	var targets selectedTargets
-	for key := range m.selected {
-		switch {
-		case strings.HasPrefix(key, "g:"):
-			targets.groups = append(targets.groups, strings.TrimPrefix(key, "g:"))
-		case strings.HasPrefix(key, "s:"):
-			targets.sessions = append(targets.sessions, strings.TrimPrefix(key, "s:"))
-		}
-	}
-	return targets
-}
-
-func (m *model) toggleSelectedRow(row int) {
-	info := rowAt(m.nodes, row)
-	key := info.key(m.nodes)
-	if key == "" {
+// pruneSessionExpanded drops expansion state for sessions that no longer exist.
+func (m *model) pruneSessionExpanded() {
+	if len(m.sessionExpanded) == 0 {
 		return
 	}
-	if m.selected[key] {
-		delete(m.selected, key)
-	} else {
-		m.selected[key] = true
-	}
-}
-
-func (m *model) toggleSelectAllVisible() {
-	total := totalRows(m.nodes)
-	if total == 0 {
-		return
-	}
-	allSelected := true
-	keys := make([]string, 0, total)
-	for row := 0; row < total; row++ {
-		key := rowAt(m.nodes, row).key(m.nodes)
-		if key == "" {
-			continue
-		}
-		keys = append(keys, key)
-		if !m.selected[key] {
-			allSelected = false
+	live := make(map[string]bool)
+	for _, n := range m.nodes {
+		for _, s := range n.sessions {
+			live[s.Name] = true
 		}
 	}
-	for _, key := range keys {
-		if allSelected {
-			delete(m.selected, key)
-		} else {
-			m.selected[key] = true
+	for name := range m.sessionExpanded {
+		if !live[name] {
+			delete(m.sessionExpanded, name)
 		}
 	}
-}
-
-func (m *model) pruneSelection() {
-	valid := make(map[string]bool)
-	total := totalRows(m.nodes)
-	for row := 0; row < total; row++ {
-		key := rowAt(m.nodes, row).key(m.nodes)
-		if key != "" {
-			valid[key] = true
-		}
-	}
-	for key := range m.selected {
-		if !valid[key] {
-			delete(m.selected, key)
-		}
-	}
-}
-
-func (m model) resetSelectedShells(targets selectedTargets) (model, tea.Cmd) {
-	sessions := make(map[string]bool)
-	for _, session := range targets.sessions {
-		sessions[session] = true
-	}
-	for _, group := range targets.groups {
-		for _, session := range m.sessionsInGroup(group) {
-			sessions[session] = true
-		}
-	}
-	if len(sessions) == 0 {
-		m.status = "select a session to reset"
-		return m, nil
-	}
-
-	var cmds []tea.Cmd
-	for session := range sessions {
-		var cmd tea.Cmd
-		m, cmd = m.resetSessionShell(session)
-		if cmd != nil {
-			cmds = append(cmds, cmd)
-		}
-	}
-	m.selected = make(map[string]bool)
-	m.status = fmt.Sprintf("reset %d session shell(s)", len(sessions))
-	cmds = append(cmds, clearScreenCmd())
-	return m, tea.Batch(cmds...)
 }
 
 func (m model) resetSessionShell(session string) (model, tea.Cmd) {
@@ -1172,19 +803,6 @@ func (m model) resetSessionShell(session string) (model, tea.Cmd) {
 	go sh.readLoop()
 	m.status = fmt.Sprintf("reset session %s", session)
 	return m, tea.Batch(waitForPTYOutput(sh.id, sh.ptyCh), clearScreenCmd(), persistLayoutCmd(session, leaf))
-}
-
-func (m model) sessionsInGroup(group string) []string {
-	for _, node := range m.nodes {
-		if node.group == group {
-			sessions := make([]string, 0, len(node.sessions))
-			for _, session := range node.sessions {
-				sessions = append(sessions, session.Name)
-			}
-			return sessions
-		}
-	}
-	return nil
 }
 
 func (m model) handleTermKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1229,8 +847,8 @@ func (m model) executeCommand(input string) (tea.Model, tea.Cmd) {
 	case "q", "quit", ":q", ":quit":
 		return m, tea.Quit
 	case "jobs", "j", ":jobs", ":j":
-		nm := m.openJobsView()
-		return nm, sampleHWCmd(nm.hwMon)
+		nm, mouseCmd := m.openJobsView()
+		return nm, tea.Batch(sampleHWCmd(nm.hwMon), mouseCmd)
 	case "vs", "vsplit", "vsp":
 		nm, cmd := m.splitFocused(splitVert)
 		return nm, cmd
@@ -1243,70 +861,13 @@ func (m model) executeCommand(input string) (tea.Model, tea.Cmd) {
 	case "x", "close", "kill-pane":
 		nm, cmd := m.closeFocused()
 		return nm, cmd
-	case "tree":
-		m.treeVisible = true
-		m.focus = paneTree
-		m.resizeShell()
-	case "term", "terminal", "shell":
-		m.focus = paneTerm
-	case "toggle", "toggle-tree":
-		m.treeVisible = !m.treeVisible
-		if !m.treeVisible && m.focus == paneTree {
-			m.focus = paneTerm
-		}
-		m.resizeShell()
+	case "detach", "d", ":detach":
+		nm, mouseCmd := m.openJobsView()
+		return nm, tea.Batch(clearScreenCmd(), sampleHWCmd(nm.hwMon), mouseCmd)
 	default:
 		m.status = fmt.Sprintf("unknown command: %s", input)
 	}
 	return m, nil
-}
-
-func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "esc":
-		m.inputMode = inputNone
-		m.textInput.Blur()
-		m.createGroup = false
-		m.createInGroup = ""
-		m.renameGroup = false
-		m.moveSession = ""
-		m.resizeShell()
-		return m, nil
-	case "enter":
-		value := m.textInput.Value()
-		m.textInput.Blur()
-		mode := m.inputMode
-		m.inputMode = inputNone
-		m.resizeShell()
-		if value == "" {
-			return m, nil
-		}
-		switch mode {
-		case inputCreate:
-			if m.createGroup {
-				m.createGroup = false
-				return m, createGroup(value)
-			}
-			group := m.createInGroup
-			m.createInGroup = ""
-			return m, createSessionInGroup(value, group)
-		case inputRename:
-			if m.renameGroup {
-				m.renameGroup = false
-				return m, renameGroup(m.renameOld, value)
-			}
-			return m, renameSession(m.renameOld, value)
-		case inputMove:
-			session := m.moveSession
-			m.moveSession = ""
-			return m, moveSession(session, value)
-		}
-		return m, nil
-	}
-
-	var cmd tea.Cmd
-	m.textInput, cmd = m.textInput.Update(msg)
-	return m, cmd
 }
 
 func (m model) View() string {
@@ -1331,16 +892,8 @@ func (m model) View() string {
 	// The region spans the header line plus the content rows; line 0 is the
 	// box top border, lines 1..contentHeight are the content/bottom rows.
 	regionLines := m.renderTermRegion(regionW, contentHeight+1)
-	treeRegionLines := m.renderTreeRegion(contentHeight + 1)
 
 	for row := 0; row < contentHeight+1; row++ {
-		if m.treeVisible {
-			if row < len(treeRegionLines) {
-				b.WriteString(treeRegionLines[row])
-			} else {
-				b.WriteString(fitToWidth("", m.treeWidth))
-			}
-		}
 		if row < len(regionLines) {
 			b.WriteString(regionLines[row])
 		} else {
@@ -1353,22 +906,6 @@ func (m model) View() string {
 		b.WriteString(m.modeStyle().Render(" COMMAND "))
 		b.WriteString(" ")
 		b.WriteString(m.cmdInput.View())
-		b.WriteByte('\n')
-	} else if m.inputMode == inputCreate || m.inputMode == inputRename || m.inputMode == inputMove {
-		prompt := "new session: "
-		if m.inputMode == inputCreate && m.createGroup {
-			prompt = "new group: "
-		}
-		if m.inputMode == inputRename {
-			prompt = "rename to: "
-		}
-		if m.inputMode == inputMove {
-			prompt = "move to group: "
-		}
-		b.WriteString(m.modeStyle().Render(" COMMAND "))
-		b.WriteString(" ")
-		b.WriteString(inputStyle.Render(prompt))
-		b.WriteString(m.textInput.View())
 		b.WriteByte('\n')
 	}
 
@@ -1448,42 +985,6 @@ func (m model) renderTermRegion(width, height int) []string {
 		lines[y] = fitToWidth(b.String(), width)
 	}
 	return lines
-}
-
-func (m model) renderTreeRegion(height int) []string {
-	if !m.treeVisible {
-		return nil
-	}
-	width := m.treeWidth
-	if width < 4 {
-		width = 4
-	}
-	if height < 3 {
-		height = 3
-	}
-	focused := m.focus == paneTree
-	st := termBorderStyle(focused)
-	lines := make([]string, height)
-	lines[0] = boxedTop(width, treeTitle(m.treeWide), st)
-	innerW := width - 2
-	innerH := height - 2
-	treeLines := renderTreeLines(m.nodes, m.cursor, innerH, innerW, m.selected, focused)
-	for row := 0; row < innerH; row++ {
-		content := ""
-		if row < len(treeLines) {
-			content = treeLines[row]
-		}
-		lines[row+1] = st.Render("│") + treePaneStyle.Render(fitToWidth(content, innerW)) + st.Render("│")
-	}
-	lines[height-1] = boxedBottom(width, st)
-	return lines
-}
-
-func treeTitle(wide bool) string {
-	if wide {
-		return " sessions wide "
-	}
-	return " sessions "
 }
 
 // placePane draws one pane's terminal contents into the grid at its rectangle
@@ -1699,45 +1200,32 @@ func (m model) renderFooter() string {
 
 	left := []statusSegment{
 		{text: " " + m.modeName() + " ", style: m.modeStyle()},
-		{text: " " + m.statusLocation() + " ", style: airlineFocus},
-	}
-	if selected := m.selectedStatus(); selected != "" {
-		left = append(left, statusSegment{text: " " + selected + " ", style: airlineInfo})
+		{text: " " + m.activeSession + " ", style: airlineFocus},
 	}
 
 	right := m.branchSegments()
 	right = append(right,
-		statusSegment{text: fmt.Sprintf(" sel %d ", len(m.selected)), style: airlineMuted},
 		statusSegment{text: fmt.Sprintf(" jobs %d ", m.jobCount()), style: airlineMuted},
 		statusSegment{text: fmt.Sprintf(" slots %d ", m.maxSlots), style: airlineMuted},
-		statusSegment{text: " gg G space v r d M ", style: airlineFocus},
+		statusSegment{text: " ^B d:detach ^B |/- split ", style: airlineFocus},
 	)
 	return renderAirline(m.width, left, right)
 }
 
 // modeName reports the current editing mode in vim terms: COMMAND while a TUI
-// command/text prompt is open, INSERT when typing into a shell pane, NORMAL
-// while navigating the tree.
+// command prompt is open, otherwise INSERT (typing into the focused shell pane).
 func (m model) modeName() string {
-	switch {
-	case m.inputMode != inputNone:
+	if m.inputMode != inputNone {
 		return "COMMAND"
-	case m.focus == paneTerm:
-		return "INSERT"
-	default:
-		return "NORMAL"
 	}
+	return "INSERT"
 }
 
 func (m model) modeStyle() lipgloss.Style {
-	switch {
-	case m.inputMode != inputNone:
+	if m.inputMode != inputNone {
 		return modeCommandStyle
-	case m.focus == paneTerm:
-		return modeInsertStyle
-	default:
-		return modeNormalStyle
 	}
+	return modeInsertStyle
 }
 
 // branchSegments returns the git-branch status segment for the launch
@@ -1780,47 +1268,6 @@ func renderStatusSegments(segments []statusSegment) string {
 	return b.String()
 }
 
-func (m model) statusLocation() string {
-	if m.focus == paneTerm || !m.treeVisible {
-		return m.activeSession
-	}
-	info := rowAt(m.nodes, m.cursor)
-	if info.nodeIdx >= 0 && info.nodeIdx < len(m.nodes) {
-		if info.isSession {
-			return m.nodes[info.nodeIdx].sessions[info.sessionIdx].Name
-		}
-		return m.nodes[info.nodeIdx].group
-	}
-	return "tree"
-}
-
-func (m model) selectedStatus() string {
-	if m.focus != paneTree || !m.treeVisible || totalRows(m.nodes) == 0 {
-		return ""
-	}
-	info := rowAt(m.nodes, m.cursor)
-	if info.nodeIdx < 0 || info.nodeIdx >= len(m.nodes) {
-		return ""
-	}
-	node := m.nodes[info.nodeIdx]
-	if info.isSession {
-		session := node.sessions[info.sessionIdx]
-		return fmt.Sprintf("%s (%d jobs)", session.Name, len(node.jobs[session.Name]))
-	}
-	return fmt.Sprintf("%s (%d sessions)", node.group, len(node.sessions))
-}
-
-func (m model) selectedGroup() string {
-	if totalRows(m.nodes) == 0 {
-		return "default"
-	}
-	info := rowAt(m.nodes, m.cursor)
-	if info.nodeIdx >= 0 && info.nodeIdx < len(m.nodes) {
-		return m.nodes[info.nodeIdx].group
-	}
-	return "default"
-}
-
 func (m model) jobCount() int {
 	total := 0
 	for _, node := range m.nodes {
@@ -1836,9 +1283,6 @@ func (m model) jobCount() int {
 // 1-cell border on each side.
 func (m model) termRegionSize() (w, h int) {
 	w = m.width
-	if m.treeVisible {
-		w = m.width - m.treeWidth
-	}
 	h = m.height - 1 // footer line
 	if m.inputMode != inputNone {
 		h--
@@ -1913,33 +1357,6 @@ func (m model) shellDone() bool {
 	return m.shell.done
 }
 
-func computeTreeWidth(totalWidth int, wide bool) int {
-	if wide {
-		w := totalWidth * 55 / 100
-		if w > 80 {
-			w = 80
-		}
-		if w < 30 {
-			w = 30
-		}
-		if totalWidth-w < 20 {
-			w = totalWidth - 20
-		}
-		if w < 20 {
-			w = 20
-		}
-		return w
-	}
-	w := totalWidth * 30 / 100
-	if w > 40 {
-		w = 40
-	}
-	if w < 20 {
-		w = 20
-	}
-	return w
-}
-
 func fitToWidth(s string, width int) string {
 	n := lipgloss.Width(s)
 	if n == width {
@@ -2011,16 +1428,6 @@ func renameSession(oldName, newName string) tea.Cmd {
 	}
 }
 
-func createGroup(name string) tea.Cmd {
-	return func() tea.Msg {
-		err := client.GroupCreate(name)
-		if err != nil {
-			return actionDoneMsg{err: err}
-		}
-		return actionDoneMsg{status: fmt.Sprintf("created group %q", name)}
-	}
-}
-
 func deleteGroup(name string) tea.Cmd {
 	return func() tea.Msg {
 		err := client.GroupDelete(name)
@@ -2028,16 +1435,6 @@ func deleteGroup(name string) tea.Cmd {
 			return actionDoneMsg{err: err}
 		}
 		return actionDoneMsg{status: fmt.Sprintf("deleted group %q", name)}
-	}
-}
-
-func renameGroup(oldName, newName string) tea.Cmd {
-	return func() tea.Msg {
-		err := client.GroupRename(oldName, newName)
-		if err != nil {
-			return actionDoneMsg{err: err}
-		}
-		return actionDoneMsg{status: fmt.Sprintf("renamed group %q -> %q", oldName, newName)}
 	}
 }
 
@@ -2051,22 +1448,27 @@ func moveSession(session, group string) tea.Cmd {
 	}
 }
 
-func deleteSelected(targets selectedTargets) tea.Cmd {
+// editSession renames and/or moves a session in one sequential command so the
+// rename lands before the move references the new name.
+func editSession(oldName, newName, oldGroup, newGroup string) tea.Cmd {
 	return func() tea.Msg {
-		deleted := 0
-		for _, session := range targets.sessions {
-			if err := client.SessionDelete(session); err != nil {
-				return actionDoneMsg{err: fmt.Errorf("delete session %q: %w", session, err)}
+		cur := oldName
+		if newName != "" && newName != oldName {
+			if err := client.SessionRename(oldName, newName); err != nil {
+				return actionDoneMsg{err: err}
 			}
-			deleted++
+			cur = newName
 		}
-		for _, group := range targets.groups {
-			if err := client.GroupDelete(group); err != nil {
-				return actionDoneMsg{err: fmt.Errorf("delete group %q: %w", group, err)}
+		if newGroup != oldGroup {
+			g := newGroup
+			if g == "" {
+				g = "default"
 			}
-			deleted++
+			if err := client.SessionMove(cur, g); err != nil {
+				return actionDoneMsg{err: err}
+			}
 		}
-		return actionDoneMsg{status: fmt.Sprintf("deleted %d item(s)", deleted)}
+		return actionDoneMsg{status: fmt.Sprintf("updated session %q", cur)}
 	}
 }
 
@@ -2119,40 +1521,22 @@ func makeUrgent(id int) tea.Cmd {
 	}
 }
 
-// Run opens the interactive TUI in the normal split view.
+// Run opens the interactive TUI on the jobs & sessions management screen.
 func Run() error { return run(false) }
 
-// RunJobs opens the interactive TUI directly in the job-management view.
+// RunJobs opens the management screen in jobs-only mode, where quitting exits
+// the program instead of dropping to a session (used by `ru -j`).
 func RunJobs() error { return run(true) }
 
-func run(startInJobs bool) error {
+func run(jobsOnly bool) error {
+	// Home is the full-screen management view. No terminal session is attached
+	// until the user opens one from the list, so no shell is built here — this
+	// also means running `ru` from inside an existing qrush pane never
+	// re-attaches to (or nests on) the pane it was launched from.
 	m := newModel(nil)
-
-	// The job-management view only reads job data — it never attaches to the
-	// terminal panes. Skip building the shell session entirely so that running
-	// `ru --jobs` from inside an existing interactive session does not
-	// re-attach to (and recursively nest on) the very pane it was launched
-	// from, nor clobber that session's saved layout.
-	if startInJobs {
-		m.activeSession = "default"
-		m.jobsOnly = true
-		m = m.openJobsView()
-		p := tea.NewProgram(m, tea.WithAltScreen())
-		_, err := p.Run()
-		return err
-	}
-
-	created := (&m).buildSession("default", 80, 24)
-	if len(created) == 0 {
-		return fmt.Errorf("could not start terminal session")
-	}
-	m.activeSession = "default"
-	m.focusPane = firstLeaf(m.layouts["default"])
-	m.syncFocusShell()
-	m.focus = paneTerm
-	// Record the (possibly pruned or freshly opened) layout up front so a
-	// crash before any structural change still leaves a consistent layout.
-	_ = client.SetTerminalLayout("default", marshalLayout(m.layouts["default"]), paneNames(m.layouts["default"]))
+	m.activeSession = ""
+	m.jobsOnly = jobsOnly
+	m, _ = m.openJobsView()
 
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	finalModel, err := p.Run()

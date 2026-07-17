@@ -235,23 +235,31 @@ func plural(n int) string {
 }
 
 func styledState(j protocol.JobInfo) string {
+	text, style := jobStateText(j)
+	return style.Render(text)
+}
+
+// jobStateText returns a job's state label together with the style that colors
+// it. Splitting the two lets callers recompose the label onto a highlighted
+// background while keeping the semantic foreground (e.g. red for a failure).
+func jobStateText(j protocol.JobInfo) (string, lipgloss.Style) {
 	switch j.State {
 	case protocol.StateRunning:
-		return runningStyle.Render("running")
+		return "running", runningStyle
 	case protocol.StateQueued:
-		return queuedStyle.Render("queued")
+		return "queued", queuedStyle
 	case protocol.StateFinished:
 		if j.Result.DiedBySignal {
-			return finishedErrStyle.Render(fmt.Sprintf("signal %d", j.Result.Signal))
+			return fmt.Sprintf("signal %d", j.Result.Signal), finishedErrStyle
 		}
 		if j.Result.ExitCode != 0 {
-			return finishedErrStyle.Render(fmt.Sprintf("exit %d", j.Result.ExitCode))
+			return fmt.Sprintf("exit %d", j.Result.ExitCode), finishedErrStyle
 		}
-		return finishedStyle.Render("finished")
+		return "finished", finishedStyle
 	case protocol.StateSkipped:
-		return skippedStyle.Render("skipped")
+		return "skipped", skippedStyle
 	default:
-		return "unknown"
+		return "unknown", lipgloss.NewStyle()
 	}
 }
 

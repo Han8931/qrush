@@ -94,7 +94,10 @@ func Parse(args []string) (*Command, error) {
 		ListFormat:  protocol.FormatDefault,
 	}
 
+	// Bare `ru` opens the interactive management TUI. The plain job listing is
+	// available via `ru -l`.
 	if len(args) == 0 {
+		cmd.Action = ActionInteractive
 		return cmd, nil
 	}
 

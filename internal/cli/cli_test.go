@@ -7,12 +7,13 @@ import (
 )
 
 func TestParseNoArgs(t *testing.T) {
+	// Bare `ru` opens the interactive management TUI; `ru -l` prints the list.
 	cmd, err := Parse([]string{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cmd.Action != ActionList {
-		t.Errorf("expected ActionList, got %d", cmd.Action)
+	if cmd.Action != ActionInteractive {
+		t.Errorf("expected ActionInteractive, got %d", cmd.Action)
 	}
 }
 
