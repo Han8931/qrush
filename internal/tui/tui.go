@@ -7,7 +7,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/cursor"
 	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/x/ansi"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -34,6 +36,7 @@ type model struct {
 	nextPaneID   int
 
 	nodes     []treeNode
+	groups    []string // all group names, from the last tree poll
 	maxSlots  int
 	err       error
 	status    string
@@ -74,6 +77,11 @@ type model struct {
 	// is turned on only while the management view is showing so terminal panes
 	// keep their native text selection.
 	mouseOn bool
+
+	// tuiWatch is the TUI-registration connection; takenOver is set when the
+	// daemon displaced this TUI because a newer `ru` attached.
+	tuiWatch  *client.Client
+	takenOver bool
 }
 
 func firstLeaf(root *paneNode) *paneNode {
@@ -126,11 +134,23 @@ type actionDoneMsg struct {
 	err    error
 }
 
-func newModel(sh *shellState) model {
+// newTextInput returns a textinput whose cursor is always visible while the
+// field is focused. The static mode matters: blink updates aren't routed to
+// these inputs, so a blinking cursor would simply never show. The explicit
+// block style matters too — the default cursor is bare reverse-video, which
+// some terminal/theme combinations render invisibly.
+func newTextInput() textinput.Model {
 	ti := textinput.New()
+	ti.Cursor.SetMode(cursor.CursorStatic)
+	ti.Cursor.Style = inputCursorStyle
+	return ti
+}
+
+func newModel(sh *shellState) model {
+	ti := newTextInput()
 	ti.CharLimit = 64
 
-	ci := textinput.New()
+	ci := newTextInput()
 	ci.CharLimit = 128
 	ci.Prompt = ":"
 
@@ -162,8 +182,31 @@ func newModel(sh *shellState) model {
 	}
 }
 
+// takenOverMsg reports that a newer `ru` displaced this TUI.
+type takenOverMsg struct{}
+
+// watchTUITakeover waits on the registration connection; it resolves when the
+// daemon displaces this TUI in favor of a newer one. Any other error (daemon
+// gone, normal shutdown closing the conn) resolves to a discarded nil msg.
+func watchTUITakeover(c *client.Client) tea.Cmd {
+	return func() tea.Msg {
+		for {
+			msg, err := c.Recv()
+			if err != nil {
+				return nil
+			}
+			if msg.Type == protocol.MsgTUITakenOver {
+				return takenOverMsg{}
+			}
+		}
+	}
+}
+
 func (m model) Init() tea.Cmd {
 	cmds := []tea.Cmd{fetchTreeData, tickCmd()}
+	if m.tuiWatch != nil {
+		cmds = append(cmds, watchTUITakeover(m.tuiWatch))
+	}
 	for _, sh := range m.panes {
 		go sh.readLoop()
 		cmds = append(cmds, waitForPTYOutput(sh.id, sh.ptyCh))
@@ -230,6 +273,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for _, n := range m.nodes {
 			expanded[n.group] = n.expanded
 		}
+		m.groups = msg.groups
 		m.nodes = buildTree(msg.groups, msg.sessions, msg.jobs)
 		for i, n := range m.nodes {
 			if exp, ok := expanded[n.group]; ok {
@@ -308,6 +352,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.jobs.pending = 0
 		}
 		return m, nil
+
+	case takenOverMsg:
+		m.takenOver = true
+		return m, tea.Quit
+
+	case settingsMsg:
+		m = m.openSettingsForm(msg.logdir)
+		return m, textinput.Blink
 
 	case actionDoneMsg:
 		if msg.err != nil {
@@ -1313,20 +1365,18 @@ func fitToWidth(s string, width int) string {
 	return s + strings.Repeat(" ", width-n)
 }
 
+// truncateToWidth cuts s to the given display width, preserving ANSI styling.
+// (The previous strip-and-rebuild approach deleted every escape code, so any
+// line that overflowed its box lost all its colors — including the edit-box
+// cursor block.)
 func truncateToWidth(s string, width int) string {
 	if width <= 0 {
 		return ""
 	}
-	plain := stripAnsi(s)
-	var b strings.Builder
-	for _, r := range plain {
-		next := b.String() + string(r)
-		if lipgloss.Width(next) > width {
-			break
-		}
-		b.WriteRune(r)
+	if lipgloss.Width(s) <= width {
+		return padRight(s, width)
 	}
-	return padRight(b.String(), width)
+	return padRight(ansi.Truncate(s, width, ""), width)
 }
 
 // sessionExists reports whether a session by that name is present in the tree.
@@ -1502,10 +1552,22 @@ func run(jobsOnly bool) error {
 	m.jobsOnly = jobsOnly
 	m, _ = m.openJobsView()
 
+	// Register as the daemon's one active TUI. If another `ru` is already
+	// attached, the daemon detaches it in our favor; if we get displaced
+	// later, tuiWatch delivers takenOverMsg and we quit with a notice.
+	tuiConn, err := client.AttachTUI()
+	if err == nil {
+		defer tuiConn.Close()
+		m.tuiWatch = tuiConn
+	}
+
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	finalModel, err := p.Run()
 	if fm, ok := finalModel.(model); ok {
 		fm.closeShells()
+		if fm.takenOver {
+			fmt.Fprintln(os.Stderr, "ru: detached — another ru attached to this daemon")
+		}
 	}
 	return err
 }

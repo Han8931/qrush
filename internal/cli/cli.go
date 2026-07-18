@@ -56,6 +56,11 @@ const (
 	ActionTermKill
 	ActionRerun
 	ActionJobsView
+	ActionConfigList
+	ActionConfigGet
+	ActionConfigSet
+	ActionConfigEdit
+	ActionConfigPath
 )
 
 type Command struct {
@@ -117,6 +122,9 @@ func Parse(args []string) (*Command, error) {
 	}
 	if args[0] == "tui" {
 		return parseTuiSubcommand(cmd, args[1:])
+	}
+	if args[0] == "config" {
+		return parseConfigSubcommand(cmd, args[1:])
 	}
 
 	i := 0
@@ -535,6 +543,40 @@ func parseTuiSubcommand(cmd *Command, args []string) (*Command, error) {
 		cmd.Action = ActionJobsView
 	default:
 		return nil, fmt.Errorf("unknown tui command: %s", args[0])
+	}
+	return cmd, nil
+}
+
+// parseConfigSubcommand handles `ru config [list|get|set|edit|path]`. The key
+// lands in EnvKey and (for set) the value in EnvValue; a multi-word value
+// (e.g. an on_finish command) is joined with spaces.
+func parseConfigSubcommand(cmd *Command, args []string) (*Command, error) {
+	if len(args) == 0 {
+		cmd.Action = ActionConfigList
+		return cmd, nil
+	}
+	switch args[0] {
+	case "list":
+		cmd.Action = ActionConfigList
+	case "get":
+		if len(args) < 2 {
+			return nil, fmt.Errorf("config get requires a key")
+		}
+		cmd.Action = ActionConfigGet
+		cmd.EnvKey = args[1]
+	case "set":
+		if len(args) < 3 {
+			return nil, fmt.Errorf("config set requires a key and a value")
+		}
+		cmd.Action = ActionConfigSet
+		cmd.EnvKey = args[1]
+		cmd.EnvValue = strings.Join(args[2:], " ")
+	case "edit":
+		cmd.Action = ActionConfigEdit
+	case "path":
+		cmd.Action = ActionConfigPath
+	default:
+		return nil, fmt.Errorf("unknown config command: %s", args[0])
 	}
 	return cmd, nil
 }

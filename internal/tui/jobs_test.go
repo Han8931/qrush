@@ -6,6 +6,9 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
+
 	"github.com/han/qrush/internal/protocol"
 	"github.com/han/qrush/internal/sysmon"
 )
@@ -37,15 +40,25 @@ func TestJobsQuitJobsOnly(t *testing.T) {
 	}
 }
 
-func TestJobsQuitDropsToSplit(t *testing.T) {
-	// With a session open, q drops back to that session's split view.
+func TestJobsQuitWithOpenSession(t *testing.T) {
+	// Even with a session open (e.g. after a detach), q quits the program —
+	// daemon-side shells persist. esc is the key that drops back in.
 	m := model{viewMode: viewJobs, activeSession: "default", layouts: map[string]*paneNode{"default": {}}}
-	got, cmd := m.handleJobsKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	_, cmd := m.handleJobsKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	if !quitsOn(t, cmd) {
+		t.Fatal("q with an open session should quit the program")
+	}
+}
+
+func TestJobsEscDropsToSplit(t *testing.T) {
+	// With a session open, esc drops back to that session's split view.
+	m := model{viewMode: viewJobs, activeSession: "default", layouts: map[string]*paneNode{"default": {}}}
+	got, cmd := m.handleJobsKey(tea.KeyMsg{Type: tea.KeyEsc})
 	if quitsOn(t, cmd) {
-		t.Fatal("q with an open session should not quit the program")
+		t.Fatal("esc with an open session should not quit the program")
 	}
 	if fm := got.(model); fm.viewMode != viewSplit {
-		t.Errorf("q should drop to viewSplit, got viewMode=%d", fm.viewMode)
+		t.Errorf("esc should drop to viewSplit, got viewMode=%d", fm.viewMode)
 	}
 }
 
@@ -60,6 +73,124 @@ func TestJobsQuitNoSessionQuits(t *testing.T) {
 
 func runeKey(r string) tea.KeyMsg {
 	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(r)}
+}
+
+// `e` on a job row opens the combined edit box: job name + session + group,
+// with ↑/↓ cycling all three fields.
+func TestJobEditFormFields(t *testing.T) {
+	j := protocol.JobInfo{ID: 7, Label: "lbl", Session: "work"}
+	m := model{viewMode: viewJobs}
+	m.jobs.rows = []mgmtRow{{kind: rowJob, job: j, session: "work", group: "grp"}}
+
+	got, _ := m.handleJobsKey(runeKey("e"))
+	fm := got.(model)
+	f := fm.jobs.form
+	if !f.active || f.jobID != 7 {
+		t.Fatalf("expected active job-edit form for job 7, got %+v", f)
+	}
+	if n := len((&f).inputs()); n != 3 {
+		t.Fatalf("expected 3 fields on a job row, got %d", n)
+	}
+	if f.labelInput.Value() != "lbl" || f.nameInput.Value() != "work" || f.groupInput.Value() != "grp" {
+		t.Errorf("form not prefilled: %q %q %q", f.labelInput.Value(), f.nameInput.Value(), f.groupInput.Value())
+	}
+
+	got, _ = fm.handleJobsKey(tea.KeyMsg{Type: tea.KeyDown})
+	fm = got.(model)
+	if fm.jobs.form.focusField != 1 {
+		t.Errorf("down should focus the session field, got %d", fm.jobs.form.focusField)
+	}
+	got, _ = fm.handleJobsKey(tea.KeyMsg{Type: tea.KeyDown})
+	fm = got.(model)
+	if !fm.jobs.form.groupFocused() {
+		t.Errorf("second down should focus the group field, got %d", fm.jobs.form.focusField)
+	}
+}
+
+// With the group field focused, the edit box lists the existing groups so
+// tab-cycling is a visible choice.
+func TestSessionFormListsGroupsWhenGroupFocused(t *testing.T) {
+	m := model{groups: []string{"default", "work"}}
+	fm := m.openSessionForm(false, "sess", "default")
+	fm.jobs.form.setFocus(1) // group field
+
+	out := strings.Join(fm.sessionFormLines(24, 60), "\n")
+	if !strings.Contains(stripAnsi(out), "work") {
+		t.Errorf("expected group strip to list %q, got %q", "work", stripAnsi(out))
+	}
+
+	// Not shown while the name field has focus.
+	fm.jobs.form.setFocus(0)
+	out = stripAnsi(strings.Join(fm.sessionFormLines(24, 60), "\n"))
+	if strings.Contains(out, "work") {
+		t.Errorf("group strip should be hidden when the name field is focused, got %q", out)
+	}
+}
+
+// The focused field of an edit box must render a visible cursor block. Tests
+// run without a TTY, where lipgloss strips all styling, so force a color
+// profile for the assertion.
+func TestSessionFormShowsCursor(t *testing.T) {
+	orig := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	defer lipgloss.SetColorProfile(orig)
+
+	m := model{}
+	fm := m.openSessionForm(true, "", "")
+	out := strings.Join(fm.sessionFormLines(20, 60), "\n")
+	if !strings.Contains(out, "\x1b[7m") && !strings.Contains(out, "\x1b[7;") &&
+		!strings.Contains(out, ";7m") && !strings.Contains(out, "\x1b[48;") {
+		t.Errorf("expected a styled cursor block in the form render, got %q", out)
+	}
+}
+
+// Space tags the cursor job (ranger/lf-style), actions consume the tagged
+// set, and Esc clears it.
+func TestJobsSpaceTagsAndActs(t *testing.T) {
+	jobs := []protocol.JobInfo{{ID: 3, Session: "default"}, {ID: 5, Session: "default"}}
+	m := model{viewMode: viewJobs}
+	m.jobs.rows = jobRows(jobs)
+	m.jobs.allJobs = jobs
+
+	got, _ := m.handleJobsKey(tea.KeyMsg{Type: tea.KeySpace})
+	fm := got.(model)
+	if !fm.jobs.tagged[3] {
+		t.Fatal("expected job 3 tagged after space")
+	}
+	if fm.jobs.cursor != 1 {
+		t.Errorf("expected cursor to advance to 1, got %d", fm.jobs.cursor)
+	}
+
+	got, _ = fm.handleJobsKey(tea.KeyMsg{Type: tea.KeySpace})
+	fm = got.(model)
+	if len(fm.jobs.tagged) != 2 {
+		t.Fatalf("expected 2 tagged jobs, got %d", len(fm.jobs.tagged))
+	}
+	if ids := fm.jobsActionIDs(); len(ids) != 2 {
+		t.Errorf("expected actions to target both tagged jobs, got %v", ids)
+	}
+
+	got, _ = fm.handleJobsKey(tea.KeyMsg{Type: tea.KeyEsc})
+	fm = got.(model)
+	if len(fm.jobs.tagged) != 0 {
+		t.Errorf("esc should clear the tagged set, got %v", fm.jobs.tagged)
+	}
+}
+
+// Toggling an already-tagged job with Space removes the tag.
+func TestJobsSpaceToggleUntags(t *testing.T) {
+	jobs := []protocol.JobInfo{{ID: 3, Session: "default"}}
+	m := model{viewMode: viewJobs}
+	m.jobs.rows = jobRows(jobs)
+	m.jobs.allJobs = jobs
+
+	got, _ := m.handleJobsKey(tea.KeyMsg{Type: tea.KeySpace})
+	fm := got.(model)
+	got, _ = fm.handleJobsKey(tea.KeyMsg{Type: tea.KeySpace})
+	fm = got.(model)
+	if len(fm.jobs.tagged) != 0 {
+		t.Errorf("second space should untag, got %v", fm.jobs.tagged)
+	}
 }
 
 // jobRows wraps plain jobs as management job-rows for tests.

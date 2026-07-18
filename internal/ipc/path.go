@@ -7,13 +7,14 @@ import (
 	"path/filepath"
 	"runtime"
 	"time"
+
+	"github.com/han/qrush/internal/config"
 )
 
 func SocketPath() string {
-	if p := os.Getenv("QRUSH_SOCKET"); p != "" {
-		return p
-	}
-	if p := os.Getenv("TS_SOCKET"); p != "" {
+	// config.Load resolves the socket through every layer: the QRUSH_SOCKET /
+	// TS_SOCKET environment variables win over a `socket` config-file entry.
+	if p := config.Load().Socket; p != "" {
 		return p
 	}
 

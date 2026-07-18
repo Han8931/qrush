@@ -60,6 +60,11 @@ var (
 	treeEmptyStyle      = lipgloss.NewStyle().Italic(true).Foreground(cFgDim)
 	treePaneStyle       = lipgloss.NewStyle().Background(cPanelBg)
 	cursorStyle         = lipgloss.NewStyle().Foreground(cInk).Background(cCursorBg)
+	// inputCursorStyle is the text-input caret: a maximum-contrast solid block
+	// (white in dark mode, near-black in light). NOTE: bubbles' cursor.View
+	// applies Reverse(true) on top of this style, swapping fg/bg at render
+	// time — so the *foreground* here is the block color the user sees.
+	inputCursorStyle = lipgloss.NewStyle().Foreground(cFgBright).Background(cInk)
 	cursorInactiveStyle = lipgloss.NewStyle().Foreground(cInactFg).Background(cInactBg)
 	selectedStyle       = lipgloss.NewStyle().Foreground(cInk).Background(cSelectBg)
 	cursorSelectedStyle = lipgloss.NewStyle().Foreground(cInk).Background(cSelectBg)
@@ -69,6 +74,7 @@ var (
 	finishedErrStyle    = lipgloss.NewStyle().Bold(true).Foreground(cRed)
 	skippedStyle        = lipgloss.NewStyle().Foreground(cFgMuted)
 	jobIDStyle          = lipgloss.NewStyle().Foreground(cBlue)
+	jobNameStyle        = lipgloss.NewStyle().Foreground(cAccent)
 	statusBarStyle      = lipgloss.NewStyle().Background(cBarBg).Foreground(cFgDim)
 	inputStyle          = lipgloss.NewStyle().Foreground(cBlue)
 	helpStyle           = lipgloss.NewStyle().Foreground(cFgFaint)

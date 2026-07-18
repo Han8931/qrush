@@ -1,12 +1,28 @@
 package server
 
 import (
+	"os"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/han/qrush/internal/protocol"
 )
+
+// removeOutputFiles deletes the auto-generated output files of jobs that have
+// left the queue, so cleared/removed jobs don't leave ru_*.out files behind in
+// the log directory forever. User-specified logfiles (-O) are kept — qrush
+// didn't choose that path, so it must not delete it. Call without the queue
+// lock held; missing files (job never started) are fine.
+func removeOutputFiles(jobs []*Job) {
+	for _, j := range jobs {
+		if j == nil || !j.Info.StoreOutput || j.Logfile != "" || j.Info.OutputFilename == "" {
+			continue
+		}
+		os.Remove(j.Info.OutputFilename)
+		os.Remove(j.Info.OutputFilename + ".e")
+	}
+}
 
 type Job struct {
 	ID               int
@@ -129,13 +145,10 @@ func (q *JobQueue) AddWithOutputPath(req protocol.NewJobRequest, pathFor func(jo
 
 func (q *JobQueue) Remove(id int) bool {
 	q.mu.Lock()
-	defer q.mu.Unlock()
 
 	j, ok := q.byID[id]
-	if !ok {
-		return false
-	}
-	if j.Info.State == protocol.StateRunning {
+	if !ok || j.Info.State == protocol.StateRunning {
+		q.mu.Unlock()
 		return false
 	}
 
@@ -146,6 +159,9 @@ func (q *JobQueue) Remove(id int) bool {
 			break
 		}
 	}
+	q.mu.Unlock()
+
+	removeOutputFiles([]*Job{j})
 	return true
 }
 
@@ -198,6 +214,18 @@ func (q *JobQueue) SetRunning(id int, pid int, outputFile string) {
 		}
 		j.Info.StartTime = time.Now()
 	}
+}
+
+func (q *JobQueue) SetLabel(id int, label string) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	j, ok := q.byID[id]
+	if !ok {
+		return false
+	}
+	j.Info.Label = label
+	return true
 }
 
 func (q *JobQueue) SetOutputFilename(id int, outputFile string) {
@@ -253,25 +281,25 @@ func (q *JobQueue) MarkSkipped(id int) {
 
 func (q *JobQueue) ClearFinished() int {
 	q.mu.Lock()
-	defer q.mu.Unlock()
 
-	var remaining []*Job
-	count := 0
+	var remaining, dropped []*Job
 	for _, j := range q.jobs {
 		if j.Info.State == protocol.StateFinished || j.Info.State == protocol.StateSkipped {
 			delete(q.byID, j.ID)
-			count++
+			dropped = append(dropped, j)
 		} else {
 			remaining = append(remaining, j)
 		}
 	}
 	q.jobs = remaining
-	return count
+	q.mu.Unlock()
+
+	removeOutputFiles(dropped)
+	return len(dropped)
 }
 
 func (q *JobQueue) PruneFinished(maxKeep int) {
 	q.mu.Lock()
-	defer q.mu.Unlock()
 
 	var finished []*Job
 	for _, j := range q.jobs {
@@ -282,13 +310,15 @@ func (q *JobQueue) PruneFinished(maxKeep int) {
 
 	toRemove := len(finished) - maxKeep
 	if toRemove <= 0 {
+		q.mu.Unlock()
 		return
 	}
 
+	dropped := finished[:toRemove]
 	removeIDs := make(map[int]bool)
-	for i := 0; i < toRemove; i++ {
-		removeIDs[finished[i].ID] = true
-		delete(q.byID, finished[i].ID)
+	for _, j := range dropped {
+		removeIDs[j.ID] = true
+		delete(q.byID, j.ID)
 	}
 
 	var remaining []*Job
@@ -298,6 +328,9 @@ func (q *JobQueue) PruneFinished(maxKeep int) {
 		}
 	}
 	q.jobs = remaining
+	q.mu.Unlock()
+
+	removeOutputFiles(dropped)
 }
 
 func (q *JobQueue) MakeUrgent(id int) bool {
@@ -390,7 +423,13 @@ func (q *JobQueue) NextRunnable(maxSlots int, busySlots int) (*Job, bool) {
 		if j.Info.State != protocol.StateQueued {
 			continue
 		}
-		if j.Info.NumSlots > freeSlots {
+		need := j.Info.NumSlots
+		if need > maxSlots {
+			// A job asking for more slots than exist would otherwise wait
+			// forever; treat it as needing the whole machine instead.
+			need = maxSlots
+		}
+		if need > freeSlots {
 			continue
 		}
 		if !q.dependenciesMet(j) {
@@ -531,20 +570,21 @@ func (q *JobQueue) AllInfoBySession(session string) []protocol.JobInfo {
 
 func (q *JobQueue) ClearFinishedInSession(session string) int {
 	q.mu.Lock()
-	defer q.mu.Unlock()
 
-	var remaining []*Job
-	count := 0
+	var remaining, dropped []*Job
 	for _, j := range q.jobs {
 		if j.Info.Session == session && (j.Info.State == protocol.StateFinished || j.Info.State == protocol.StateSkipped) {
 			delete(q.byID, j.ID)
-			count++
+			dropped = append(dropped, j)
 		} else {
 			remaining = append(remaining, j)
 		}
 	}
 	q.jobs = remaining
-	return count
+	q.mu.Unlock()
+
+	removeOutputFiles(dropped)
+	return len(dropped)
 }
 
 func (q *JobQueue) CreateSession(name string) bool {
@@ -590,33 +630,39 @@ func (q *JobQueue) RenameSession(oldName, newName string) bool {
 
 func (q *JobQueue) DeleteSession(name string) (bool, string) {
 	q.mu.Lock()
-	defer q.mu.Unlock()
 
 	if name == "default" {
+		q.mu.Unlock()
 		return false, "cannot delete default session"
 	}
 	if _, ok := q.sessions[name]; !ok {
+		q.mu.Unlock()
 		return false, "session not found"
 	}
 
 	for _, j := range q.jobs {
 		if j.Info.Session == name {
 			if j.Info.State == protocol.StateRunning || j.Info.State == protocol.StateQueued {
+				q.mu.Unlock()
 				return false, "session has active jobs"
 			}
 		}
 	}
 
-	var remaining []*Job
+	var remaining, dropped []*Job
 	for _, j := range q.jobs {
 		if j.Info.Session == name {
 			delete(q.byID, j.ID)
+			dropped = append(dropped, j)
 		} else {
 			remaining = append(remaining, j)
 		}
 	}
 	q.jobs = remaining
 	delete(q.sessions, name)
+	q.mu.Unlock()
+
+	removeOutputFiles(dropped)
 	return true, ""
 }
 

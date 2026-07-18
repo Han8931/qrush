@@ -7,6 +7,41 @@ import (
 	"github.com/hinshun/vt10x"
 )
 
+func TestColorSGR(t *testing.T) {
+	cases := []struct {
+		c    vt10x.Color
+		base string
+		want string
+	}{
+		{vt10x.Black, "38", "38;5;0"},         // palette 0 is a real color, not "unset"
+		{vt10x.Red, "38", "38;5;1"},           // ANSI colors are 0-based — no off-by-one
+		{vt10x.Color(203), "48", "48;5;203"},  // xterm palette
+		{vt10x.Color(0x123456), "38", "38;2;18;52;86"}, // packed truecolor
+		{vt10x.DefaultFG, "38", ""},           // sentinels mean "terminal default"
+		{vt10x.DefaultBG, "48", ""},
+	}
+	for _, tc := range cases {
+		if got := colorSGR(tc.c, tc.base); got != tc.want {
+			t.Errorf("colorSGR(%d, %s) = %q, want %q", tc.c, tc.base, got, tc.want)
+		}
+	}
+}
+
+func TestSGRPrefix(t *testing.T) {
+	if got := (termStyle{cursor: true}).sgrPrefix(); got != "\x1b[7m" {
+		t.Errorf("cursor prefix = %q", got)
+	}
+	if got := (termStyle{fg: vt10x.DefaultFG, bg: vt10x.DefaultBG}).sgrPrefix(); got != "" {
+		t.Errorf("default style should need no prefix, got %q", got)
+	}
+	if got := (termStyle{fg: vt10x.Green, bg: vt10x.DefaultBG}).sgrPrefix(); got != "\x1b[38;5;2m" {
+		t.Errorf("green fg prefix = %q", got)
+	}
+	if got := (termStyle{fg: vt10x.Green, bg: vt10x.Color(17)}).sgrPrefix(); got != "\x1b[38;5;2;48;5;17m" {
+		t.Errorf("fg+bg prefix = %q", got)
+	}
+}
+
 func TestClearAfterAltScreenExit(t *testing.T) {
 	in := []byte("before\x1b[?1049lprompt")
 	out, clear := clearAfterAltScreenExit(in)

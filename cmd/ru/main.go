@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
-	"syscall"
-
+	"strconv"
 	"strings"
+	"syscall"
+	"text/tabwriter"
 
 	"github.com/han/qrush/internal/cli"
 	"github.com/han/qrush/internal/client"
@@ -33,6 +35,15 @@ func main() {
 		return
 	case cli.ActionServerMode:
 		runServer()
+		return
+	case cli.ActionConfigList, cli.ActionConfigGet, cli.ActionConfigSet,
+		cli.ActionConfigEdit, cli.ActionConfigPath:
+		// Config commands read/write local files; they must not auto-start
+		// (or require) a daemon.
+		if err := doConfig(cmd); err != nil {
+			fmt.Fprintf(os.Stderr, "ru: %v\n", err)
+			os.Exit(1)
+		}
 		return
 	case cli.ActionInteractive, cli.ActionJobsView:
 		if err := client.EnsureServer(); err != nil {
@@ -398,6 +409,114 @@ func doForeground(cmd *cli.Command) error {
 		os.Exit(result.ExitCode)
 	}
 	return nil
+}
+
+func doConfig(cmd *cli.Command) error {
+	switch cmd.Action {
+	case cli.ActionConfigPath:
+		fmt.Println(config.FilePath())
+		return nil
+
+	case cli.ActionConfigList:
+		_, settings, warnings := config.LoadDetailed()
+		for _, w := range warnings {
+			fmt.Fprintf(os.Stderr, "ru: warning: %s\n", w)
+		}
+		tw := tabwriter.NewWriter(os.Stdout, 2, 4, 2, ' ', 0)
+		fmt.Fprintln(tw, "KEY\tVALUE\tSOURCE\tDESCRIPTION")
+		for _, s := range settings {
+			val := s.Value
+			if val == "" {
+				val = "-"
+			}
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", s.Key.Name, val, s.Source, s.Key.Desc)
+		}
+		return tw.Flush()
+
+	case cli.ActionConfigGet:
+		if _, ok := config.KeyByName(cmd.EnvKey); !ok {
+			return fmt.Errorf("unknown config key %q (see: ru config list)", cmd.EnvKey)
+		}
+		_, settings, _ := config.LoadDetailed()
+		for _, s := range settings {
+			if s.Key.Name == cmd.EnvKey {
+				fmt.Println(s.Value)
+			}
+		}
+		return nil
+
+	case cli.ActionConfigSet:
+		key, value := cmd.EnvKey, cmd.EnvValue
+		k, ok := config.KeyByName(key)
+		if !ok {
+			return fmt.Errorf("unknown config key %q (see: ru config list)", key)
+		}
+		if k.IsInt {
+			n, err := strconv.Atoi(value)
+			if err != nil {
+				return fmt.Errorf("%s needs an integer, got %q", key, value)
+			}
+			if n < k.MinInt {
+				return fmt.Errorf("%s must be at least %d", key, k.MinInt)
+			}
+		}
+		if err := config.SetFileValue(key, value); err != nil {
+			return err
+		}
+		// The file now carries the user's latest intent; drop any stale
+		// runtime override so it actually takes effect.
+		if err := config.DeleteRuntime(key); err != nil {
+			return err
+		}
+		if os.Getenv(k.EnvVar) != "" {
+			fmt.Fprintf(os.Stderr, "ru: note: $%s is set and overrides the config file\n", k.EnvVar)
+		}
+		applyConfigLive(key, value)
+		return nil
+
+	case cli.ActionConfigEdit:
+		path := config.FilePath()
+		if path == "" {
+			return fmt.Errorf("cannot determine config path (no home directory)")
+		}
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			if err := os.MkdirAll(config.ConfigDir(), 0o700); err != nil {
+				return err
+			}
+			if err := os.WriteFile(path, []byte(config.FileTemplate()), 0o600); err != nil {
+				return err
+			}
+		}
+		editor := os.Getenv("VISUAL")
+		if editor == "" {
+			editor = os.Getenv("EDITOR")
+		}
+		if editor == "" {
+			editor = "vi"
+		}
+		ed := exec.Command(editor, path)
+		ed.Stdin, ed.Stdout, ed.Stderr = os.Stdin, os.Stdout, os.Stderr
+		return ed.Run()
+	}
+	return nil
+}
+
+// applyConfigLive pushes a changed setting to an already-running daemon so
+// `ru config set` takes effect immediately. A daemon that isn't running is
+// fine — the setting is picked up on its next start.
+func applyConfigLive(key, value string) {
+	switch key {
+	case "slots":
+		if n, err := strconv.Atoi(value); err == nil {
+			if err := client.SetMaxSlots(n); err == nil {
+				fmt.Fprintln(os.Stderr, "ru: applied to the running daemon")
+			}
+		}
+	case "logdir":
+		if err := client.SetLogdir(value); err == nil {
+			fmt.Fprintln(os.Stderr, "ru: applied to the running daemon")
+		}
+	}
 }
 
 func validateSupportedOptions(cmd *cli.Command) error {

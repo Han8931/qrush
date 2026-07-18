@@ -2,6 +2,28 @@ package client
 
 import "github.com/han/qrush/internal/protocol"
 
+// AttachTUI registers this process as the daemon's single active interactive
+// TUI, returning the long-lived registration connection. Attaching displaces
+// any previously registered TUI — the daemon sends it MsgTUITakenOver and
+// disconnects it, so two TUIs never mirror the same panes.
+func AttachTUI() (*Client, error) {
+	c, err := Connect()
+	if err != nil {
+		return nil, err
+	}
+	if err := c.Send(&protocol.Msg{Type: protocol.MsgTUIAttach}); err != nil {
+		c.Close()
+		return nil, err
+	}
+	// Wait for the registration ack so a near-simultaneous second attach can't
+	// be processed ahead of ours.
+	if err := recvOK(c); err != nil {
+		c.Close()
+		return nil, err
+	}
+	return c, nil
+}
+
 func AttachTerminal(session, pane string, cols, rows int) (*Client, error) {
 	c, err := Connect()
 	if err != nil {

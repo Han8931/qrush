@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"strconv"
 	"sync"
 	"sync/atomic"
 
@@ -32,6 +33,10 @@ type Server struct {
 	// pendingJobsView is set by MsgRequestJobsView and read-and-cleared by the
 	// next tree poll, signalling an attached TUI to open its jobs view.
 	pendingJobsView bool
+	// tuiConn is the single registered interactive TUI (MsgTUIAttach). A new
+	// registration displaces the old one so two TUIs never mirror the same
+	// panes (they would fight over PTY sizes and stomp each other's layouts).
+	tuiConn net.Conn
 }
 
 func New(cfg *config.Config) (*Server, error) {
@@ -45,7 +50,10 @@ func New(cfg *config.Config) (*Server, error) {
 		return nil, fmt.Errorf("listen on %s: %w", path, err)
 	}
 
-	logDir := cfg.TmpDir
+	logDir := cfg.Logdir
+	if logDir == "" {
+		logDir = cfg.TmpDir
+	}
 	executor := NewExecutor(logDir)
 	executor.SetOnFinishCommand(cfg.OnFinish)
 	scheduler := NewScheduler(jobs, executor, cfg.Slots)
@@ -194,6 +202,8 @@ func (s *Server) dispatch(ctx context.Context, conn net.Conn, msg *protocol.Msg)
 		return s.handleCountRunning(conn)
 	case protocol.MsgGetLabel:
 		return s.handleGetLabel(conn, msg)
+	case protocol.MsgSetJobLabel:
+		return s.handleSetJobLabel(conn, msg)
 	case protocol.MsgLastID:
 		return s.handleLastID(conn)
 	case protocol.MsgGetCmd:
@@ -244,6 +254,8 @@ func (s *Server) dispatch(ctx context.Context, conn net.Conn, msg *protocol.Msg)
 		return s.handleTerminalSetLayout(conn, msg)
 	case protocol.MsgTerminalListAll:
 		return s.handleTerminalListAll(conn)
+	case protocol.MsgTUIAttach:
+		return s.handleTUIAttach(conn)
 	default:
 		s.sendError(conn, "unknown message type")
 		return true
@@ -377,6 +389,10 @@ func (s *Server) handleSetMaxSlots(conn net.Conn, msg *protocol.Msg) bool {
 		return s.sendError(conn, "slots must be greater than zero")
 	}
 	s.scheduler.SetMaxSlots(payload.Slots)
+	// Persist so the setting survives a daemon restart.
+	if err := config.SaveRuntime("slots", strconv.Itoa(payload.Slots)); err != nil {
+		log.Printf("persist slots: %v", err)
+	}
 	return s.sendMsg(conn, &protocol.Msg{Type: protocol.MsgActionOK})
 }
 
@@ -461,6 +477,17 @@ func (s *Server) handleGetLabel(conn net.Conn, msg *protocol.Msg) bool {
 	})
 }
 
+func (s *Server) handleSetJobLabel(conn net.Conn, msg *protocol.Msg) bool {
+	payload, err := protocol.PayloadAs[protocol.PayloadSetLabel](msg)
+	if err != nil {
+		return s.sendError(conn, err.Error())
+	}
+	if !s.jobs.SetLabel(payload.JobID, payload.Label) {
+		return s.sendError(conn, "job not found")
+	}
+	return s.sendMsg(conn, &protocol.Msg{Type: protocol.MsgActionOK})
+}
+
 func (s *Server) handleLastID(conn net.Conn) bool {
 	return s.sendMsg(conn, &protocol.Msg{
 		Type:    protocol.MsgLastIDOK,
@@ -538,6 +565,10 @@ func (s *Server) handleSetLogdir(conn net.Conn, msg *protocol.Msg) bool {
 		return s.sendError(conn, "log directory is required")
 	}
 	s.executor.SetLogDir(payload.Path)
+	// Persist so the setting survives a daemon restart.
+	if err := config.SaveRuntime("logdir", payload.Path); err != nil {
+		log.Printf("persist logdir: %v", err)
+	}
 	return s.sendMsg(conn, &protocol.Msg{Type: protocol.MsgActionOK})
 }
 
@@ -687,6 +718,43 @@ func (s *Server) handleSessionMove(conn net.Conn, msg *protocol.Msg) bool {
 		return s.sendError(conn, "cannot move session")
 	}
 	return s.sendMsg(conn, &protocol.Msg{Type: protocol.MsgSessionMoveOK})
+}
+
+// handleTUIAttach registers conn as the one active interactive TUI and blocks
+// for its lifetime. Any previously registered TUI is told to quit and cut off,
+// so at most one TUI drives the daemon's panes at a time.
+func (s *Server) handleTUIAttach(conn net.Conn) bool {
+	// Long-lived connection — exempt from maxConns, like terminal attaches.
+	s.activeConns.Add(-1)
+	defer s.activeConns.Add(1)
+
+	s.mu.Lock()
+	old := s.tuiConn
+	s.tuiConn = conn
+	s.mu.Unlock()
+	if old != nil {
+		_ = protocol.Send(old, &protocol.Msg{Type: protocol.MsgTUITakenOver})
+		old.Close()
+	}
+	// Ack the registration so the client knows it is the active TUI before it
+	// proceeds (without this, two near-simultaneous attaches can race).
+	if !s.sendMsg(conn, &protocol.Msg{Type: protocol.MsgActionOK}) {
+		return false
+	}
+
+	// Park until the TUI exits (its side closes) or a newer TUI displaces us.
+	for {
+		if _, err := protocol.Recv(conn); err != nil {
+			break
+		}
+	}
+
+	s.mu.Lock()
+	if s.tuiConn == conn {
+		s.tuiConn = nil
+	}
+	s.mu.Unlock()
+	return false
 }
 
 func (s *Server) pruneFinished() {

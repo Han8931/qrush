@@ -119,16 +119,32 @@ type jobsView struct {
 	visual bool // visual (multi-select) mode active
 	anchor int  // row index where the visual selection started
 
+	// tagged is the ranger/lf-style persistent selection: job IDs toggled
+	// with Space. Actions (x/u/r/d) apply to the tagged set when non-empty.
+	tagged map[int]bool
+
 	sortMode sortMode
 	sortRev  bool // reverse the current sort
 
 	pending      byte // first key of a two-key motion: 'g' (gg) or 'd' (dd)
 	pendingTimer int
 
-	confirm confirmState
-	form    sessionForm
-	picker  sessionPicker
-	pager   pagerState
+	confirm  confirmState
+	form     sessionForm
+	settings configForm
+	picker   sessionPicker
+	pager    pagerState
+}
+
+// configForm is the settings modal opened by `:config`: the daemon options
+// that are editable at runtime (parallel slots, log directory).
+type configForm struct {
+	active      bool
+	slotsInput  textinput.Model
+	logdirInput textinput.Model
+	origSlots   int
+	origLogdir  string
+	focusField  int // 0 = slots, 1 = logdir
 }
 
 // sessionPicker is the overlay (opened with `s`) that lists every session —
@@ -150,16 +166,47 @@ type pickerRow struct {
 	jobs    int
 }
 
-// sessionForm is the small modal for creating or editing a session (name +
-// group). It is shown over the management list.
+// sessionForm is the edit modal opened with `e`. On a session row (or when
+// creating) it edits the session's name + group; on a job row it grows a job
+// name field on top, so one box edits everything about the row.
 type sessionForm struct {
 	active     bool
 	creating   bool // blank form → SessionCreate; else rename/move
+	jobID      int  // >= 0: job row — show the job-name field; -1 otherwise
+	origLabel  string
 	origName   string
 	origGroup  string
-	nameInput  textinput.Model
+	labelInput textinput.Model // job name; only rendered when jobID >= 0
+	nameInput  textinput.Model // session name
 	groupInput textinput.Model
-	focusField int // 0 = name, 1 = group
+	focusField int // index into inputs(): [job name,] session, group
+}
+
+// inputs returns pointers to the form's visible fields in focus order.
+func (f *sessionForm) inputs() []*textinput.Model {
+	if f.jobID >= 0 {
+		return []*textinput.Model{&f.labelInput, &f.nameInput, &f.groupInput}
+	}
+	return []*textinput.Model{&f.nameInput, &f.groupInput}
+}
+
+// setFocus focuses field i (wrapping) and blurs the rest.
+func (f *sessionForm) setFocus(i int) {
+	inputs := f.inputs()
+	n := len(inputs)
+	f.focusField = ((i % n) + n) % n
+	for idx, ti := range inputs {
+		if idx == f.focusField {
+			ti.Focus()
+		} else {
+			ti.Blur()
+		}
+	}
+}
+
+// groupFocused reports whether the group field (always last) has focus.
+func (f *sessionForm) groupFocused() bool {
+	return f.focusField == len(f.inputs())-1
 }
 
 type pagerState struct {
@@ -180,7 +227,7 @@ type pagerState struct {
 }
 
 type columnWidths struct {
-	id, group, session, state, tm, command int
+	id, group, session, state, tm, name, command int
 }
 
 type jobsGTimeoutMsg struct{ id int }
@@ -265,8 +312,8 @@ func sortMgmtRows(rows []mgmtRow, mode sortMode, rev bool) {
 			}
 			return a.job.ID < b.job.ID
 		case sortByTime:
-			if a.job.Result.RealTimeMS != b.job.Result.RealTimeMS {
-				return a.job.Result.RealTimeMS > b.job.Result.RealTimeMS
+			if ta, tb := format.ElapsedMS(a.job), format.ElapsedMS(b.job); ta != tb {
+				return ta > tb
 			}
 			return a.job.ID < b.job.ID
 		default: // sortGrouped
@@ -310,6 +357,18 @@ func rowKey(r mgmtRow) string {
 func (m *model) refreshJobsRows() {
 	rows := m.buildMgmtRows()
 	m.jobs.rows = rows
+	// Drop tags whose job no longer exists (removed, cleared, pruned).
+	if len(m.jobs.tagged) > 0 {
+		live := make(map[int]bool, len(m.jobs.allJobs))
+		for _, j := range m.jobs.allJobs {
+			live[j.ID] = true
+		}
+		for id := range m.jobs.tagged {
+			if !live[id] {
+				delete(m.jobs.tagged, id)
+			}
+		}
+	}
 	m.jobs.cursor, m.jobs.cursorKey = anchorMgmtCursor(rows, m.jobs.cursorKey, m.jobs.cursor)
 	m.jobs.offset = clampOffset(m.jobs.cursor, m.jobs.offset, m.jobsBodyHeight(), len(rows))
 	if m.jobs.anchor >= len(rows) {
@@ -454,13 +513,13 @@ func clampScroll(offset, bodyH, total int) int {
 }
 
 func computeJobColumns(inner int) columnWidths {
-	c := columnWidths{id: 5, group: 10, session: 12, state: 11, tm: 8}
-	const sep = 5 // single space between each of the six columns
-	fixedNoCmd := func() int { return c.id + c.group + c.session + c.state + c.tm + sep }
+	c := columnWidths{id: 5, group: 10, session: 12, state: 11, tm: 8, name: 14}
+	const sep = 8 // three spaces after ID, single space between the other columns
+	fixedNoCmd := func() int { return c.id + c.group + c.session + c.state + c.tm + c.name + sep }
 	c.command = inner - fixedNoCmd()
 	if c.command < 10 {
 		// Reclaim room from the widest text columns first.
-		for _, p := range []*int{&c.session, &c.group} {
+		for _, p := range []*int{&c.name, &c.session, &c.group} {
 			if c.command >= 10 {
 				break
 			}
@@ -492,11 +551,13 @@ func formatJobRow(j protocol.JobInfo, group string, c columnWidths) string {
 func renderJobsRow(j protocol.JobInfo, group string, c columnWidths, bg lipgloss.TerminalColor) string {
 	timeStr := ""
 	if j.State == protocol.StateRunning || j.State == protocol.StateFinished {
-		timeStr = format.Duration(j.Result.RealTimeMS)
+		timeStr = format.Duration(format.ElapsedMS(j))
 	}
-	cmd := j.Command
-	if j.Label != "" {
-		cmd = "[" + j.Label + "] " + j.Command
+	// The label lives in its own NAME column; unnamed jobs echo a dim command
+	// snippet there so the column still identifies the row at a glance.
+	nameTxt, nameStyle := j.Label, jobNameStyle
+	if nameTxt == "" {
+		nameTxt, nameStyle = j.Command, treeEmptyStyle
 	}
 	stateTxt, stateStyle := jobStateText(j)
 	cell := func(text string, w int, style lipgloss.Style) string {
@@ -514,8 +575,9 @@ func renderJobsRow(j protocol.JobInfo, group string, c columnWidths, bg lipgloss
 	sess := cell(j.Session, c.session, sessionStyle)
 	state := cell(stateTxt, c.state, stateStyle)
 	tm := cell(timeStr, c.tm, lipgloss.NewStyle())
-	command := cell(cmd, c.command, lipgloss.NewStyle())
-	return id + sep + grp + sep + sess + sep + state + sep + tm + sep + command
+	name := cell(nameTxt, c.name, nameStyle)
+	command := cell(j.Command, c.command, lipgloss.NewStyle())
+	return id + sep + sep + sep + grp + sep + sess + sep + state + sep + tm + sep + name + sep + command
 }
 
 // padRowBg extends a highlighted row's background to the full inner width. For
@@ -550,11 +612,12 @@ func (m model) jobsHeaderRow(c columnWidths) string {
 		}
 		return title
 	}
-	row := fmt.Sprintf("%*s", c.id, mark("ID", m.jobs.sortMode == sortByID)) + " " +
+	row := fmt.Sprintf("%*s", c.id, mark("ID", m.jobs.sortMode == sortByID)) + "   " +
 		fitToWidth(mark("GROUP", m.jobs.sortMode == sortGrouped), c.group) + " " +
 		fitToWidth("SESSION", c.session) + " " +
 		fitToWidth(mark("STATE", m.jobs.sortMode == sortByState), c.state) + " " +
 		fitToWidth(mark("TIME", m.jobs.sortMode == sortByTime), c.tm) + " " +
+		fitToWidth("NAME", c.name) + " " +
 		fitToWidth("COMMAND", c.command)
 	return treeSummaryStyle.Render(row)
 }
@@ -653,6 +716,10 @@ func (m model) handleJobsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleSessionFormKey(msg)
 	}
 
+	if m.jobs.settings.active {
+		return m.handleSettingsFormKey(msg)
+	}
+
 	if m.jobs.picker.active {
 		return m.handlePickerKey(msg)
 	}
@@ -707,13 +774,19 @@ func (m model) handleJobsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	key := msg.String()
 
-	// Complete a pending two-key motion (gg jumps to top).
+	// Complete a pending two-key motion (gg jumps to top; sg/si/ss/st sort).
 	if m.jobs.pending != 0 {
 		op := m.jobs.pending
 		m.jobs.pending = 0
 		if op == 'g' && key == "g" {
 			(&m).jobsGoto(0)
 			return m, nil
+		}
+		if op == 's' {
+			if mode, ok := chordSortMode(key); ok {
+				(&m).applySort(mode)
+				return m, nil
+			}
 		}
 		// not a completion — fall through and process key normally
 	}
@@ -735,10 +808,31 @@ func (m model) handleJobsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.jobs.visual = false
 			return m, nil
 		}
+		if len(m.jobs.tagged) > 0 {
+			m.jobs.tagged = nil
+			return m, nil
+		}
 		return m.leaveManagement()
 	case "q":
-		return m.leaveManagement()
-	case "j", "down", " ":
+		// Always quit, even with a session open in the background — daemon-side
+		// shells persist, and `esc` already covers "back to the session". Without
+		// this, `q` after a detach just bounced back into the session.
+		return m, tea.Quit
+	case " ":
+		// ranger/lf-style tagging: toggle the cursor job's selection, then
+		// advance one row. Esc clears; actions consume the tagged set.
+		if r, ok := m.jobsCursorRow(); ok && r.kind == rowJob {
+			if m.jobs.tagged == nil {
+				m.jobs.tagged = make(map[int]bool)
+			}
+			if m.jobs.tagged[r.job.ID] {
+				delete(m.jobs.tagged, r.job.ID)
+			} else {
+				m.jobs.tagged[r.job.ID] = true
+			}
+		}
+		(&m).jobsMove(1)
+	case "j", "down":
 		(&m).jobsMove(1)
 	case "k", "up":
 		(&m).jobsMove(-1)
@@ -769,18 +863,21 @@ func (m model) handleJobsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Open the session picker (reaches every session, incl. empty ones).
 		return m.openSessionPicker(), nil
 	case "s":
-		// Cycle the sort field. Header shows the active column + direction.
-		m.jobs.sortMode = (m.jobs.sortMode + 1) % 4
-		m.refreshJobsRows()
-		return m, nil
+		// Start a sort chord: sg / si / ss / st pick the field, repeating the
+		// active field's chord reverses it. Header shows column + direction.
+		return m.startPending('s')
 	case "R":
 		// Reverse the current sort (bada-style flip).
 		m.jobs.sortRev = !m.jobs.sortRev
 		m.refreshJobsRows()
 		return m, nil
 	case "e":
-		// Edit the session the cursor job belongs to.
+		// Edit the cursor row in one box: a job row gets job name + session +
+		// group; a session row gets session name + group.
 		if r, ok := m.jobsCursorRow(); ok {
+			if r.kind == rowJob {
+				return m.openJobEditForm(r.job, r.group), textinput.Blink
+			}
 			return m.openSessionForm(false, r.session, r.group), textinput.Blink
 		}
 	case "n", "a":
@@ -789,16 +886,19 @@ func (m model) handleJobsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "x":
 		if ids := m.jobsActionIDs(); len(ids) > 0 {
 			m.jobs.visual = false
+			m.jobs.tagged = nil
 			return m, killJobs(ids)
 		}
 	case "u":
 		if ids := m.jobsActionIDs(); len(ids) > 0 {
 			m.jobs.visual = false
+			m.jobs.tagged = nil
 			return m, makeUrgentJobs(ids)
 		}
 	case "r":
 		if ids := m.jobsActionIDs(); len(ids) > 0 {
 			m.jobs.visual = false
+			m.jobs.tagged = nil
 			return m, rerunJobs(ids)
 		}
 	case "d":
@@ -809,6 +909,7 @@ func (m model) handleJobsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		allFinished := m.actionAllFinished()
 		m.jobs.visual = false
+		m.jobs.tagged = nil
 		if allFinished {
 			return m, removeJobs(ids)
 		}
@@ -837,7 +938,8 @@ func (m model) mgmtBodyTopLine() int { return 2 }
 // handleMouse maps clicks and wheel scrolls on the management screen to row
 // selection/activation. Mouse events are only captured while this screen shows.
 func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if m.viewMode != viewJobs || m.jobs.mode != jobsTable || m.jobs.form.active || m.jobs.filtering {
+	if m.viewMode != viewJobs || m.jobs.mode != jobsTable || m.jobs.form.active ||
+		m.jobs.settings.active || m.jobs.filtering {
 		return m, nil
 	}
 	if msg.Action != tea.MouseActionPress {
@@ -878,12 +980,16 @@ func (m model) leaveManagement() (tea.Model, tea.Cmd) {
 	return m, tea.Batch(clearScreenCmd(), tea.DisableMouse)
 }
 
-// activateRow opens the session that the cursor job belongs to (Enter). The
-// output pager lives on `o` instead.
+// activateRow handles Enter: a job row opens its output pager (like `o`); an
+// empty-session placeholder row opens that session's shell panes. Sessions with
+// jobs are reachable via the picker (`S`).
 func (m model) activateRow() (tea.Model, tea.Cmd) {
 	r, ok := m.jobsCursorRow()
 	if !ok {
 		return m, nil
+	}
+	if r.kind == rowJob {
+		return m, openPagerCmd(r.job)
 	}
 	return m.openSession(r.session)
 }
@@ -898,6 +1004,32 @@ func (m model) openSession(name string) (tea.Model, tea.Cmd) {
 	m.mouseOn = false
 	nm, cmd := m.activateSession(name)
 	return nm, tea.Batch(cmd, tea.DisableMouse)
+}
+
+// chordSortMode maps the second key of an `s` sort chord to its field.
+func chordSortMode(key string) (sortMode, bool) {
+	switch key {
+	case "g":
+		return sortGrouped, true
+	case "i":
+		return sortByID, true
+	case "s":
+		return sortByState, true
+	case "t":
+		return sortByTime, true
+	}
+	return 0, false
+}
+
+// applySort selects a sort field; re-selecting the active field reverses it.
+func (m *model) applySort(mode sortMode) {
+	if m.jobs.sortMode == mode {
+		m.jobs.sortRev = !m.jobs.sortRev
+	} else {
+		m.jobs.sortMode = mode
+		m.jobs.sortRev = false
+	}
+	m.refreshJobsRows()
 }
 
 func (m model) startPending(op byte) (tea.Model, tea.Cmd) {
@@ -998,25 +1130,45 @@ func (m model) handlePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func formInput(value string) textinput.Model {
+	ti := newTextInput()
+	ti.CharLimit = 64
+	ti.Prompt = ""
+	ti.SetValue(value)
+	ti.CursorEnd()
+	return ti
+}
+
 // openSessionForm shows the create/edit session modal, pre-filled when editing.
 func (m model) openSessionForm(creating bool, name, group string) model {
-	ni := textinput.New()
-	ni.CharLimit = 64
-	ni.Prompt = ""
-	ni.SetValue(name)
+	ni := formInput(name)
 	ni.Focus()
-	gi := textinput.New()
-	gi.CharLimit = 64
-	gi.Prompt = ""
-	gi.SetValue(group)
 	m.jobs.form = sessionForm{
 		active:     true,
 		creating:   creating,
+		jobID:      -1,
 		origName:   name,
 		origGroup:  group,
 		nameInput:  ni,
-		groupInput: gi,
-		focusField: 0,
+		groupInput: formInput(group),
+	}
+	return m
+}
+
+// openJobEditForm shows the combined edit modal for a job row: the job's name
+// plus its session's name and group.
+func (m model) openJobEditForm(j protocol.JobInfo, group string) model {
+	li := formInput(j.Label)
+	li.Focus()
+	m.jobs.form = sessionForm{
+		active:     true,
+		jobID:      j.ID,
+		origLabel:  j.Label,
+		origName:   j.Session,
+		origGroup:  group,
+		labelInput: li,
+		nameInput:  formInput(j.Session),
+		groupInput: formInput(group),
 	}
 	return m
 }
@@ -1027,47 +1179,193 @@ func (m model) handleSessionFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc":
 		m.jobs.form = sessionForm{}
 		return m, nil
-	case "tab", "shift+tab", "up", "down":
-		f.focusField = 1 - f.focusField
-		if f.focusField == 0 {
-			f.nameInput.Focus()
-			f.groupInput.Blur()
-		} else {
-			f.groupInput.Focus()
-			f.nameInput.Blur()
+	case "tab":
+		// On the group field, tab cycles through the existing groups so they
+		// are discoverable; ↑/↓ and shift+tab still switch fields.
+		if f.groupFocused() {
+			if g, ok := nextGroup(m.groups, strings.TrimSpace(f.groupInput.Value()), 1); ok {
+				f.groupInput.SetValue(g)
+				f.groupInput.CursorEnd()
+			}
+			return m, nil
 		}
+		f.setFocus(f.focusField + 1)
+		return m, textinput.Blink
+	case "down":
+		f.setFocus(f.focusField + 1)
+		return m, textinput.Blink
+	case "shift+tab", "up":
+		f.setFocus(f.focusField - 1)
 		return m, textinput.Blink
 	case "enter":
 		return m.submitSessionForm()
 	}
 	var cmd tea.Cmd
-	if f.focusField == 0 {
-		f.nameInput, cmd = f.nameInput.Update(msg)
-	} else {
-		f.groupInput, cmd = f.groupInput.Update(msg)
-	}
+	in := f.inputs()[f.focusField]
+	*in, cmd = in.Update(msg)
 	return m, cmd
+}
+
+// nextGroup returns the entry dir (±1) steps after cur in groups, wrapping.
+// A value not in the list (or blank) starts from the first/last group.
+func nextGroup(groups []string, cur string, dir int) (string, bool) {
+	if len(groups) == 0 {
+		return "", false
+	}
+	idx := -1
+	for i, g := range groups {
+		if g == cur {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		if dir < 0 {
+			return groups[len(groups)-1], true
+		}
+		return groups[0], true
+	}
+	return groups[(idx+dir+len(groups))%len(groups)], true
 }
 
 func (m model) submitSessionForm() (tea.Model, tea.Cmd) {
 	f := m.jobs.form
 	name := strings.TrimSpace(f.nameInput.Value())
 	group := strings.TrimSpace(f.groupInput.Value())
-	creating := f.creating
 	m.jobs.form = sessionForm{}
 	if name == "" {
 		m.status = "session name required"
 		return m, nil
 	}
-	if creating {
+	if f.creating {
 		// Open the new session as soon as the next tree refresh includes it.
 		m.pendingOpen = name
 		return m, createSessionInGroup(name, group)
 	}
-	if name == f.origName && group == f.origGroup {
+
+	var cmds []tea.Cmd
+	if f.jobID >= 0 {
+		if label := strings.TrimSpace(f.labelInput.Value()); label != f.origLabel {
+			cmds = append(cmds, setJobLabelCmd(f.jobID, label))
+		}
+	}
+	if name != f.origName || group != f.origGroup {
+		cmds = append(cmds, editSession(f.origName, name, f.origGroup, group))
+	}
+	if len(cmds) == 0 {
 		return m, nil
 	}
-	return m, editSession(f.origName, name, f.origGroup, group)
+	return m, tea.Batch(cmds...)
+}
+
+func setJobLabelCmd(id int, label string) tea.Cmd {
+	return func() tea.Msg {
+		if err := client.SetJobLabel(id, label); err != nil {
+			return actionDoneMsg{err: err}
+		}
+		if label == "" {
+			return actionDoneMsg{status: fmt.Sprintf("job %d name cleared", id)}
+		}
+		return actionDoneMsg{status: fmt.Sprintf("job %d named %q", id, label)}
+	}
+}
+
+// --- settings form (`:config`) --------------------------------------------
+
+// settingsMsg carries the fetched daemon settings that seed the `:config`
+// modal (slots come from the model's own tree poll).
+type settingsMsg struct {
+	logdir string
+}
+
+// loadSettingsCmd fetches the daemon-side settings the modal edits.
+func loadSettingsCmd() tea.Cmd {
+	return func() tea.Msg {
+		dir, err := client.GetLogdir()
+		if err != nil {
+			return actionDoneMsg{err: err}
+		}
+		return settingsMsg{logdir: dir}
+	}
+}
+
+// openSettingsForm shows the `:config` modal pre-filled with current values.
+func (m model) openSettingsForm(logdir string) model {
+	si := newTextInput()
+	si.CharLimit = 4
+	si.Prompt = ""
+	si.SetValue(strconv.Itoa(m.maxSlots))
+	si.CursorEnd()
+	si.Focus()
+	li := newTextInput()
+	li.CharLimit = 256
+	li.Prompt = ""
+	li.SetValue(logdir)
+	li.CursorEnd()
+	m.jobs.settings = configForm{
+		active:      true,
+		slotsInput:  si,
+		logdirInput: li,
+		origSlots:   m.maxSlots,
+		origLogdir:  logdir,
+	}
+	return m
+}
+
+func (f *configForm) toggleField() {
+	f.focusField = 1 - f.focusField
+	if f.focusField == 0 {
+		f.slotsInput.Focus()
+		f.logdirInput.Blur()
+	} else {
+		f.logdirInput.Focus()
+		f.slotsInput.Blur()
+	}
+}
+
+func (m model) handleSettingsFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	f := &m.jobs.settings
+	switch msg.String() {
+	case "esc":
+		m.jobs.settings = configForm{}
+		return m, nil
+	case "tab", "shift+tab", "up", "down":
+		f.toggleField()
+		return m, textinput.Blink
+	case "enter":
+		return m.submitSettingsForm()
+	}
+	var cmd tea.Cmd
+	if f.focusField == 0 {
+		f.slotsInput, cmd = f.slotsInput.Update(msg)
+	} else {
+		f.logdirInput, cmd = f.logdirInput.Update(msg)
+	}
+	return m, cmd
+}
+
+func (m model) submitSettingsForm() (tea.Model, tea.Cmd) {
+	f := m.jobs.settings
+	m.jobs.settings = configForm{}
+
+	n, err := strconv.Atoi(strings.TrimSpace(f.slotsInput.Value()))
+	if err != nil || n < 1 {
+		m.status = fmt.Sprintf("invalid slot count: %q", f.slotsInput.Value())
+		return m, nil
+	}
+	logdir := strings.TrimSpace(f.logdirInput.Value())
+
+	var cmds []tea.Cmd
+	if n != f.origSlots {
+		cmds = append(cmds, setMaxSlotsCmd(n))
+	}
+	if logdir != "" && logdir != f.origLogdir {
+		cmds = append(cmds, setLogdirCmd(logdir))
+	}
+	if len(cmds) == 0 {
+		return m, nil
+	}
+	return m, tea.Batch(cmds...)
 }
 
 // --- command mode (`:`) ---------------------------------------------------
@@ -1107,8 +1405,8 @@ func (m model) executeJobsCommand(input string) (tea.Model, tea.Cmd) {
 		cmd = strings.ToLower(args[0])
 		args = args[1:]
 	} else if cmd == "config" {
-		m.status = fmt.Sprintf("slots %d  ·  :set slots <n> · :set logdir <path> · :sort <group|id|state|time>", m.maxSlots)
-		return m, nil
+		// Open the settings edit box; the logdir is fetched first to pre-fill it.
+		return m, loadSettingsCmd()
 	}
 
 	switch cmd {
@@ -1214,6 +1512,18 @@ func (m *model) jobsGoto(idx int) {
 // jobsActionRows returns the job rows an action applies to: the visual
 // selection when active (job rows only), otherwise just the cursor job row.
 func (m model) jobsActionRows() []protocol.JobInfo {
+	// Tagged (Space) selection wins; it survives cursor movement like ranger's.
+	if len(m.jobs.tagged) > 0 {
+		var rows []protocol.JobInfo
+		for _, r := range m.jobs.rows {
+			if r.kind == rowJob && m.jobs.tagged[r.job.ID] {
+				rows = append(rows, r.job)
+			}
+		}
+		if len(rows) > 0 {
+			return rows
+		}
+	}
 	if m.jobs.visual {
 		lo, hi := m.visualRange()
 		var rows []protocol.JobInfo
@@ -1513,7 +1823,7 @@ func (m model) renderJobsView(w, h int) string {
 
 	// Overlays (help / edit form / session picker) take the whole box, so the
 	// detail pane is replaced by extra room for a taller centered box.
-	overlay := m.jobs.helping || m.jobs.form.active || m.jobs.picker.active
+	overlay := m.jobs.helping || m.jobs.form.active || m.jobs.settings.active || m.jobs.picker.active
 	regionH := bodyH
 	if overlay {
 		regionH = bodyH + jobsDetailHeight
@@ -1548,6 +1858,9 @@ func (m model) mgmtBodyLines(bodyH, inner int, cols columnWidths) []string {
 	if m.jobs.form.active {
 		return m.sessionFormLines(bodyH, inner)
 	}
+	if m.jobs.settings.active {
+		return m.settingsFormLines(bodyH, inner)
+	}
 	if m.jobs.picker.active {
 		return m.sessionPickerLines(bodyH, inner)
 	}
@@ -1577,7 +1890,8 @@ func (m model) mgmtBodyLines(bodyH, inner int, cols columnWidths) []string {
 		}
 		r := m.jobs.rows[idx]
 		isCursor := idx == m.jobs.cursor
-		inSel := m.jobs.visual && r.kind == rowJob && idx >= selLo && idx <= selHi
+		inSel := r.kind == rowJob &&
+			((m.jobs.visual && idx >= selLo && idx <= selHi) || m.jobs.tagged[r.job.ID])
 		out = append(out, m.renderMgmtRow(r, cols, inner, isCursor, inSel))
 	}
 	return out
@@ -1621,8 +1935,9 @@ func renderSessionRow(group, session string, c columnWidths, bg lipgloss.Termina
 	sess := cell(session, c.session, sessionStyle)
 	state := cell("no jobs", c.state, treeEmptyStyle)
 	tm := cell("", c.tm, lipgloss.NewStyle())
+	name := cell("", c.name, lipgloss.NewStyle())
 	command := cell("— empty session · ⏎ to open", c.command, treeEmptyStyle)
-	return id + sep + grp + sep + sess + sep + state + sep + tm + sep + command
+	return id + sep + sep + sep + grp + sep + sess + sep + state + sep + tm + sep + name + sep + command
 }
 
 // modalInnerWidth picks a modal's inner width: a comfortable fixed size that
@@ -1683,21 +1998,95 @@ func centerBox(box []string, bodyH, inner int) []string {
 	return out
 }
 
-// sessionFormLines renders the create/edit-session modal centered in the body.
+// sessionFormLines renders the edit modal centered in the body: session name +
+// group, preceded by the job-name field when a job row is being edited.
 func (m model) sessionFormLines(bodyH, inner int) []string {
 	f := m.jobs.form
 	title := "Edit session"
-	if f.creating {
+	switch {
+	case f.creating:
 		title = "New session"
+	case f.jobID >= 0:
+		title = fmt.Sprintf("Edit job %d", f.jobID)
 	}
 	boxInner := modalInnerWidth(inner, 46)
-	const labelW = 6
+	const labelW = 7
 	valueW := boxInner - 2 - labelW - 2 // marker(2) + label + gap(2)
 	if valueW < 8 {
 		valueW = 8
 	}
 	field := func(label string, ti textinput.Model, focused bool) string {
-		ti.Width = valueW
+		ti.Width = valueW - 1 // textinput renders Width+1 cells (the cursor block)
+		marker := "  "
+		lbl := fmt.Sprintf("%-*s", labelW, label)
+		if focused {
+			marker = modalTitleStyle.Render("▌ ")
+			lbl = modalActiveStyle.Render(lbl)
+		} else {
+			lbl = jobsDetailKeyStyle.Render(lbl)
+		}
+		return marker + lbl + "  " + ti.View()
+	}
+
+	labels := []string{"name", "group"}
+	if f.jobID >= 0 {
+		labels = []string{"name", "session", "group"}
+	}
+	inputs := (&f).inputs()
+	content := []string{""}
+	for i, lbl := range labels {
+		content = append(content, field(lbl, *inputs[i], f.focusField == i))
+	}
+	// While the group field is focused, show the existing groups as a strip so
+	// tab-cycling is a visible choice, not a blind rotation.
+	if f.groupFocused() {
+		choices := groupChoiceLines(m.groups, strings.TrimSpace(f.groupInput.Value()), boxInner-2)
+		if len(choices) > 0 {
+			content = append(content, "")
+			content = append(content, choices...)
+		}
+	}
+	content = append(content,
+		"",
+		helpStyle.Render("  tab: groups · ↑/↓: switch · ⏎: save · esc: cancel"),
+	)
+	return centerBox(modalBox(title, content, boxInner), bodyH, inner)
+}
+
+// groupChoiceLines renders the existing groups as wrapped strip lines; the
+// entry matching the group field's current value is highlighted.
+func groupChoiceLines(groups []string, current string, width int) []string {
+	if len(groups) == 0 {
+		return nil
+	}
+	var lines []string
+	line, lineW := "  ", 2
+	for _, g := range groups {
+		tok, tokW := treeSummaryStyle.Render(g), lipgloss.Width(g)
+		if g == current {
+			tok, tokW = selectedStyle.Render(" "+g+" "), tokW+2
+		}
+		if lineW+tokW > width && lineW > 2 {
+			lines = append(lines, line)
+			line, lineW = "  ", 2
+		}
+		line += tok + "  "
+		lineW += tokW + 2
+	}
+	return append(lines, line)
+}
+
+// settingsFormLines renders the `:config` settings modal centered in the body.
+func (m model) settingsFormLines(bodyH, inner int) []string {
+	f := m.jobs.settings
+	boxInner := modalInnerWidth(inner, 46)
+	const labelW = 6
+	valueW := boxInner - 2 - labelW - 2
+	if valueW < 8 {
+		valueW = 8
+	}
+	field := func(label string, ti textinput.Model, focused bool) string {
+		ti.Width = valueW - 1 // textinput renders Width+1 cells (the cursor block)
 		marker := "  "
 		lbl := fmt.Sprintf("%-*s", labelW, label)
 		if focused {
@@ -1710,12 +2099,12 @@ func (m model) sessionFormLines(bodyH, inner int) []string {
 	}
 	content := []string{
 		"",
-		field("name", f.nameInput, f.focusField == 0),
-		field("group", f.groupInput, f.focusField == 1),
+		field("slots", f.slotsInput, f.focusField == 0),
+		field("logdir", f.logdirInput, f.focusField == 1),
 		"",
 		helpStyle.Render("  tab: switch · ⏎: save · esc: cancel"),
 	}
-	return centerBox(modalBox(title, content, boxInner), bodyH, inner)
+	return centerBox(modalBox("Settings", content, boxInner), bodyH, inner)
 }
 
 // helpLines renders the key-binding / command help overlay.
@@ -1732,20 +2121,26 @@ func (m model) helpLines(bodyH, inner int) []string {
 		row("^d / ^u", "half-page down / up"),
 		"",
 		jobsDetailKeyStyle.Render("  Sessions & jobs"),
-		row("⏎", "open the cursor's session"),
+		row("⏎", "job output (session if empty)"),
 		row("o", "open the output pager"),
 		row("S", "session picker (incl. empty)"),
-		row("e / n / a", "edit / new session"),
+		row("e", "edit row: name/session/group"),
+		row("n / a", "new session"),
 		row("x / u / r", "kill / urgent / rerun job"),
 		row("d", "remove job(s)"),
 		"",
 		jobsDetailKeyStyle.Render("  View & config"),
-		row("s", "cycle sort · R reverse"),
+		row("sg/si/ss/st", "sort by field · repeat reverses"),
+		row("R", "reverse the current sort"),
 		row("/", "filter"),
+		row("space", "select job + move down"),
 		row("V", "visual multi-select"),
 		row(":", "command line"),
 		row(":set slots N", "set parallel jobs"),
 		row(":set logdir P", "set log directory"),
+		row(":config", "settings box (slots, logdir)"),
+		row("q", "quit"),
+		row("esc", "back to the open session"),
 		"",
 		helpStyle.Render("  press any key to close"),
 	}
@@ -1953,6 +2348,9 @@ func (m model) jobsFooter(w int) string {
 	left := []statusSegment{
 		{text: modeText, style: modeStyle},
 		{text: fmt.Sprintf(" sort:%s%s ", m.jobs.sortMode.label(), sortArrow(m.jobs.sortRev)), style: airlineFocus},
+	}
+	if n := len(m.jobs.tagged); n > 0 {
+		left = append(left, statusSegment{text: fmt.Sprintf(" sel %d ", n), style: modeInsertStyle})
 	}
 	if m.jobs.filter != "" {
 		left = append(left, statusSegment{text: fmt.Sprintf(" /%s ", m.jobs.filter), style: airlineInfo})

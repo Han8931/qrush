@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"bytes"
 	"fmt"
 	"net/url"
 	"os"
@@ -10,7 +11,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/charmbracelet/lipgloss"
 	"github.com/creack/pty"
 	"github.com/hinshun/vt10x"
 
@@ -508,7 +508,7 @@ func (s *shellState) inAltScreen() bool {
 }
 
 func bytesContains(data []byte, needle string) bool {
-	return strings.Contains(string(data), needle)
+	return bytes.Contains(data, []byte(needle))
 }
 
 func (s *shellState) notifyPTY(clear bool) {
@@ -566,28 +566,60 @@ func waitForPTYOutput(id int, ch <-chan ptyEvent) tea.Cmd {
 	}
 }
 
-func renderTermLines(vt vt10x.Terminal, cols, rows int) []string {
-	cells := renderTermCells(vt, cols, rows, true)
-	lines := make([]string, rows)
-	for y := 0; y < rows; y++ {
-		var b strings.Builder
-		for x := 0; x < cols; x++ {
-			b.WriteString(cells[y][x])
-		}
-		lines[y] = b.String()
+// termStyle keys one pane cell's visual attributes: fg/bg color plus the
+// cursor highlight (drawn as reverse video, overriding the cell colors).
+type termStyle struct {
+	fg, bg vt10x.Color
+	cursor bool
+}
+
+// sgrPrefix returns the escape sequence that starts a cell with this style,
+// or "" when the cell needs no styling (default colors, no cursor).
+func (ts termStyle) sgrPrefix() string {
+	if ts.cursor {
+		return "\x1b[7m"
 	}
-	return lines
+	fg := colorSGR(ts.fg, "38")
+	bg := colorSGR(ts.bg, "48")
+	switch {
+	case fg == "" && bg == "":
+		return ""
+	case fg == "":
+		return "\x1b[" + bg + "m"
+	case bg == "":
+		return "\x1b[" + fg + "m"
+	}
+	return "\x1b[" + fg + ";" + bg + "m"
+}
+
+// colorSGR renders one vt10x color as an SGR parameter (base "38" = fg,
+// "48" = bg). vt10x colors are the 0-based ANSI/xterm palette for values
+// < 256, packed r<<16|g<<8|b truecolor above that, and the Default* sentinels
+// from 1<<24 — those (and anything unknown) return "" for the terminal's own
+// default color.
+func colorSGR(c vt10x.Color, base string) string {
+	switch {
+	case c >= 1<<24: // vt10x.DefaultFG / DefaultBG / DefaultCursor
+		return ""
+	case c < 256:
+		return fmt.Sprintf("%s;5;%d", base, c)
+	default:
+		return fmt.Sprintf("%s;2;%d;%d;%d", base, (c>>16)&0xff, (c>>8)&0xff, c&0xff)
+	}
 }
 
 // renderTermCells renders the terminal into a rows×cols grid of styled
 // single-column strings. When showCursor is false the cursor cell is drawn
-// like any other (used for unfocused split panes).
+// like any other (used for unfocused split panes). Escape prefixes are built
+// once per distinct style per frame — not per cell — since a screen typically
+// holds a handful of styles across thousands of cells.
 func renderTermCells(vt vt10x.Terminal, cols, rows int, showCursor bool) [][]string {
 	vt.Lock()
 	defer vt.Unlock()
 
 	cells := make([][]string, rows)
 	cursor := vt.Cursor()
+	prefixes := make(map[termStyle]string)
 
 	for y := 0; y < rows; y++ {
 		row := make([]string, cols)
@@ -598,43 +630,21 @@ func renderTermCells(vt vt10x.Terminal, cols, rows int, showCursor bool) [][]str
 				ch = ' '
 			}
 
-			isCursor := showCursor && x == cursor.X && y == cursor.Y
-			row[x] = styleGlyph(ch, g.FG, g.BG, isCursor)
+			st := termStyle{fg: g.FG, bg: g.BG, cursor: showCursor && x == cursor.X && y == cursor.Y}
+			prefix, ok := prefixes[st]
+			if !ok {
+				prefix = st.sgrPrefix()
+				prefixes[st] = prefix
+			}
+			if prefix == "" {
+				row[x] = string(ch)
+			} else {
+				row[x] = prefix + string(ch) + "\x1b[0m"
+			}
 		}
 		cells[y] = row
 	}
 	return cells
-}
-
-func styleGlyph(ch rune, fg, bg vt10x.Color, isCursor bool) string {
-	s := lipgloss.NewStyle()
-
-	if isCursor {
-		s = s.Reverse(true)
-	} else {
-		if fg != 0 {
-			c := vtColorToLipgloss(fg)
-			if c != "" {
-				s = s.Foreground(lipgloss.Color(c))
-			}
-		}
-		if bg != 0 {
-			c := vtColorToLipgloss(bg)
-			if c != "" {
-				s = s.Background(lipgloss.Color(c))
-			}
-		}
-	}
-
-	return s.Render(string(ch))
-}
-
-func vtColorToLipgloss(c vt10x.Color) string {
-	idx := int(c) - 1
-	if idx >= 0 && idx < 256 {
-		return fmt.Sprintf("%d", idx)
-	}
-	return ""
 }
 
 func keyToBytes(msg tea.KeyMsg) []byte {

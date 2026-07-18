@@ -4,9 +4,20 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/han/qrush/internal/protocol"
 )
+
+// ElapsedMS returns a job's wall-clock milliseconds: the measured result for
+// finished jobs, the live elapsed time for running ones (Result is only
+// filled in at completion, so it reads 0 while the job runs).
+func ElapsedMS(j protocol.JobInfo) int64 {
+	if j.State == protocol.StateRunning && !j.StartTime.IsZero() {
+		return time.Since(j.StartTime).Milliseconds()
+	}
+	return j.Result.RealTimeMS
+}
 
 func FormatJobList(jobs []protocol.JobInfo, maxSlots int, format protocol.ListFormat) string {
 	switch format {
@@ -38,10 +49,8 @@ func formatDefault(jobs []protocol.JobInfo, maxSlots int) string {
 	for _, j := range jobs {
 		stateStr := formatState(j)
 		timeStr := ""
-		if j.State == protocol.StateRunning {
-			timeStr = Duration(j.Result.RealTimeMS)
-		} else if j.State == protocol.StateFinished {
-			timeStr = Duration(j.Result.RealTimeMS)
+		if j.State == protocol.StateRunning || j.State == protocol.StateFinished {
+			timeStr = Duration(ElapsedMS(j))
 		}
 
 		label := j.Command
@@ -93,7 +102,7 @@ func formatTab(jobs []protocol.JobInfo) string {
 	var b strings.Builder
 	for _, j := range jobs {
 		stateStr := formatState(j)
-		timeStr := Duration(j.Result.RealTimeMS)
+		timeStr := Duration(ElapsedMS(j))
 		label := j.Command
 		if j.Label != "" {
 			label = fmt.Sprintf("[%s]%s", j.Label, j.Command)

@@ -14,9 +14,9 @@ A cross-platform task spooler written in Go. Inspired by [task-spooler](https://
 - **Labels & messages** — tag jobs with `-L`, attach a free-form note with `-m` (shown by `-c` and `-i`)
 - **Sessions** — group jobs into named sessions for organization
 - **Interactive TUI** — bare `ru` opens a full-screen **management home**: a collapsible group → session → job list with live status, an output pager, and a hardware status bar (CPU/memory/load)
-- **Open sessions on demand** — press `Enter` on a session to drop into its tmux-style shell panes; `Ctrl+B d` detaches back to the management screen (shells persist in the daemon)
+- **Open sessions on demand** — open a session from the session picker (`S`, or `Enter` on an empty session's row) to drop into its tmux-style shell panes; `Ctrl+B d` detaches back to the management screen (shells persist in the daemon)
 - **tmux-style panes** — split a session's terminal into tiled shells (`Ctrl+B |`/`-` or `:vs`/`:hs`), nest them, and navigate with the `Ctrl+B` prefix
-- **Vim key bindings** — `j`/`k` to move, `h`/`l` to collapse/expand, `Ctrl+W` + `hjkl` to move focus between panes; `e`/`n` to edit or create sessions; job actions (kill/remove/rerun/urgent) inline
+- **Vim key bindings** — `j`/`k` to move, `h`/`l` to collapse/expand, `Ctrl+W` + `hjkl` to move focus between panes; `e` to edit the job/session under the cursor, `n` to create sessions; job actions (kill/remove/rerun/urgent) inline
 - **Mouse support** — click to select/open rows on the management screen (disabled inside panes so terminal text-selection still works)
 - **Cross-platform** — Linux, macOS, Windows (single binary)
 - **Auto-start** — server daemon starts on first use, no setup needed
@@ -170,16 +170,24 @@ along the bottom shows system-wide CPU, memory, load average, and core count
 ```
 
 Every session is listed: a session's jobs appear as rows, and a session with no
-jobs still gets one placeholder row (so nothing is hidden). Press **Enter** on any
-row to drop into that **session** — a tmux-style split of persistent shells (see
-below). `Ctrl+B d` detaches back to this screen. The bottom stat row shows session
+jobs still gets one placeholder row (so nothing is hidden). Press **Enter** on a
+job row to open its **output** in the pager; on an empty-session row it drops into
+that **session** — a tmux-style split of persistent shells (see below). Sessions
+are also always reachable via the **session picker** (`S`). `Ctrl+B d` detaches
+back to this screen. The bottom stat row shows session
 and job counts; the status bar shows the current **mode**: `MANAGE` (the table),
 `INSERT` (typing in a shell pane), or `COMMAND` (a `:` prompt is open); inside a
 session it also shows the focused pane's git **branch** (`⎇ <branch>`).
 
 Bare `ru` and `ru -S` both open this screen; `ru -j` opens it in **jobs-only**
-mode (where `q` quits instead of dropping to a session), and `ru -l` still just
-prints the job list to stdout. Mouse clicks select rows on this screen (mouse is
+mode, and `ru -l` still just prints the job list to stdout. `q` quits from this
+screen (daemon-hosted shells keep running); `Esc` returns to the open session.
+
+Only one interactive `ru` runs per daemon (like `tmux attach -d`): starting a
+second one takes over — the earlier instance exits with a "detached" notice
+instead of both mirroring the same shells and fighting over their sizes.
+Running `ru` from *inside* a qrush pane doesn't take over; it surfaces the
+already-running TUI's management screen. Mouse clicks select rows on this screen (mouse is
 released inside panes so terminal text-selection still works). Press `?` any time
 for a key/command cheatsheet.
 
@@ -187,21 +195,23 @@ for a key/command cheatsheet.
 
 | Key | Action |
 |-----|--------|
-| `j`/`k`/`Space`, `gg`/`G`, `Ctrl+d`/`Ctrl+u` | Move / jump / half-page |
-| `Enter` | Open the cursor row's **session** (its shell panes) |
+| `j`/`k`, `gg`/`G`, `Ctrl+d`/`Ctrl+u` | Move / jump / half-page |
+| `Space` | Select the cursor job and move down (ranger/lf-style); selected rows stay highlighted, `Esc` clears |
+| `Enter` | Open the cursor job's **output** (the pager); on an empty-session row, open that session's shell panes |
 | `o` | Open the output pager (scrollable; follows running jobs); press `i` there to overlay job info |
 | `S` | Open the **session picker** — lists every session, incl. empty ones |
-| `e` | Edit the cursor row's session (name + group) |
+| `e` | Edit the cursor row in one box — a job row: job name + its session's name/group; a session row: name + group |
 | `n` / `a` | Create a new session (opens the edit box; you land in it) |
-| `s` | Cycle the sort field (group → id → state → time); `R` reverses it |
+| `sg` / `si` / `ss` / `st` | Sort by group / id / state / time; the same chord again (or `R`) reverses |
 | `/` | Filter by command/label/session (`Enter` apply, `Esc` cancel) |
 | `:` | Command line (see below) |
 | `?` | Show the help overlay |
 | `V` | Toggle visual mode; `j`/`k` extend the selection |
-| `x` / `u` / `r` | Kill / make urgent / rerun the selected job(s) |
+| `x` / `u` / `r` | Kill / make urgent / rerun the selected job(s) — the Space-selected set, the visual range, or the cursor row |
 | `d` | Remove the selected job(s); finished jobs delete immediately, others confirm `y`/`n` |
 | `D` / `C` | Delete all finished jobs (no confirm / confirm `y`/`n`) |
-| `q` / `Esc` | Back to the open session, or quit (in `-j` mode, or with none open) |
+| `q` | Quit (daemon-hosted shells keep running) |
+| `Esc` | Back to the open session (quits if none is open) |
 
 #### Command line (`:`)
 
@@ -212,7 +222,7 @@ Press `:` to open a command line on the management screen:
 | `:set slots <n>` (or `:slots <n>`) | Set the number of parallel job slots |
 | `:set logdir <path>` | Set the daemon's log directory |
 | `:sort <group\|id\|state\|time>` | Set the sort field |
-| `:config` | Show current settings |
+| `:config` | Open the settings edit box (slots, log directory) |
 | `:clear` | Clear finished jobs |
 | `:help` | Show the help overlay |
 | `:q` | Quit |
@@ -221,9 +231,9 @@ Press `:` to open a command line on the management screen:
 
 A **session** is a named workspace with its own shells and its own jobs; sessions
 are organized into **groups**. Every session shows in the table (empty ones as a
-placeholder row), so `Enter` opens whichever one the cursor is on. The **session
-picker** (`S`) gives a compact grouped list of every session — handy for jumping
-around or reaching a session you just made:
+placeholder row, which `Enter` opens directly). The **session picker** (`S`)
+gives a compact grouped list of every session — the way to open any session,
+and handy for jumping around or reaching a session you just made:
 
 ```
 ╭─ Sessions ───────────────────────────────╮
@@ -237,7 +247,10 @@ around or reaching a session you just made:
 ```
 
 `e` (edit) and `n` (new) open a small modal to set a session's **name** and
-**group**; submitting renames/moves or creates it.
+**group**; submitting renames/moves or creates it. While the group field is
+focused, the existing groups are listed in the box with the current match
+highlighted — `Tab` steps through them, or type a new name to create a group
+on save.
 
 #### Panes (tmux-style splits)
 
@@ -325,23 +338,51 @@ ru --set_logdir /tmp/my-logs
 ru --get_logdir
 ```
 
-## Environment Variables
+## Configuration
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `QRUSH_SOCKET` | Socket path | `$TMPDIR/qrush-socket.<uid>` |
-| `QRUSH_SLOTS` | Initial max slots | `1` |
-| `QRUSH_MAXFINISHED` | Max finished jobs to keep | unlimited |
-| `QRUSH_MAXCONN` | Max client connections | `10` |
-| `QRUSH_ONFINISH` | Command to run on job completion | — |
-| `QRUSH_SAVELIST` | File to persist job queue | — |
-| `QRUSH_SESSION` | Default session when `-g` is omitted (set by the TUI on session activation) | — |
+Settings are layered; later layers win:
 
-Legacy `TS_*` names are still accepted as fallbacks for compatibility.
+```
+built-in defaults  <  config file  <  environment variables  <  runtime overrides
+```
+
+The **config file** is `~/.config/qrush/config` (`$XDG_CONFIG_HOME` respected)
+with plain `key = value` lines and `#` comments. **Runtime overrides** are
+recorded automatically when you change a setting on a live daemon (`ru -P`,
+`--set_logdir`, or the TUI's `:config` box), so those changes survive daemon
+restarts; they outrank the environment because they capture your most recent
+explicit choice.
+
+```bash
+ru config              # every setting: value + source (default/file/env/runtime)
+ru config get slots
+ru config set slots 4  # writes the file and applies to a running daemon
+ru config edit         # open the file in $EDITOR (creates a template)
+ru config path
+```
+
+| Key | Environment | Description | Default |
+|-----|-------------|-------------|---------|
+| `slots` | `QRUSH_SLOTS` | Max simultaneous job slots | `1` |
+| `logdir` | `QRUSH_LOGDIR` | Directory for job output files | `$TMPDIR` |
+| `socket` | `QRUSH_SOCKET` | Daemon socket path | `$TMPDIR/qrush-socket.<uid>` |
+| `max_finished` | `QRUSH_MAXFINISHED` | Finished jobs to keep (`-1`: unlimited) | unlimited |
+| `max_conn` | `QRUSH_MAXCONN` | Max client connections | `10` |
+| `on_finish` | `QRUSH_ONFINISH` | Command to run on job completion | — |
+| `save_list` | `QRUSH_SAVELIST` | File to persist job queue | — |
+
+`QRUSH_SESSION` (environment only) sets the default session when `-g` is
+omitted; the TUI sets it inside session shells. Legacy `TS_*` names are still
+accepted as fallbacks for compatibility.
 
 ## Output Files
 
 Each job's output is stored in `$TMPDIR/ru_<jobID>_<random>.out` (8 random hex chars). The random suffix prevents old log files from being overwritten when job IDs repeat across daemon restarts. Use `ru -o <id>` to print the exact path, `ru -c <id>` to view (or follow) the content.
+
+When a job leaves the queue (`ru -x`, `ru -C`, `QRUSH_MAXFINISHED` pruning, or
+deleting its session), its auto-generated output file is deleted with it, so
+the log directory doesn't accumulate orphaned files. Files you named yourself
+with `-O` are never deleted.
 
 ## Architecture
 

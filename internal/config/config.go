@@ -7,56 +7,53 @@ import (
 
 type Config struct {
 	Socket      string
-	MailTo      string
 	MaxFinished int
 	MaxConn     int
 	OnFinish    string
-	Env         string
 	SaveList    string
 	Slots       int
+	Logdir      string // job output directory; empty means TmpDir
 	TmpDir      string
 }
 
+// Load resolves the effective configuration (defaults < file < env < runtime).
 func Load() *Config {
+	c, _, _ := LoadDetailed()
+	return c
+}
+
+// LoadDetailed additionally returns each setting with its source layer, plus
+// warnings for values that were rejected (e.g. non-numeric slots).
+func LoadDetailed() (*Config, []Setting, []string) {
+	settings, warnings := loadSettings()
+	get := func(name string) string {
+		for _, s := range settings {
+			if s.Key.Name == name {
+				return s.Value
+			}
+		}
+		return ""
+	}
+	atoi := func(v string, fallback int) int {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+		return fallback
+	}
+
 	c := &Config{
-		MaxFinished: -1,
-		MaxConn:     10,
-		Slots:       1,
-	}
-
-	c.Socket = getenv("QRUSH_SOCKET", "TS_SOCKET")
-	c.MailTo = getenv("QRUSH_MAILTO", "TS_MAILTO")
-	c.OnFinish = getenv("QRUSH_ONFINISH", "TS_ONFINISH")
-	c.Env = getenv("QRUSH_ENV", "TS_ENV")
-	c.SaveList = getenv("QRUSH_SAVELIST", "TS_SAVELIST")
-
-	if v := getenv("QRUSH_MAXFINISHED", "TS_MAXFINISHED"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			c.MaxFinished = n
-		}
-	}
-	if v := getenv("QRUSH_MAXCONN", "TS_MAXCONN"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			c.MaxConn = n
-		}
-	}
-	if v := getenv("QRUSH_SLOTS", "TS_SLOTS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			c.Slots = n
-		}
+		Socket:      get("socket"),
+		MaxFinished: atoi(get("max_finished"), -1),
+		MaxConn:     atoi(get("max_conn"), 10),
+		OnFinish:    get("on_finish"),
+		SaveList:    get("save_list"),
+		Slots:       atoi(get("slots"), 1),
+		Logdir:      get("logdir"),
 	}
 
 	c.TmpDir = os.Getenv("TMPDIR")
 	if c.TmpDir == "" {
 		c.TmpDir = os.TempDir()
 	}
-
-	return c
-}
-
-func getenv(name, legacyName string) string {
-	if v := os.Getenv(name); v != "" {
-		return v
-	}
-	return os.Getenv(legacyName)
+	return c, settings, warnings
 }

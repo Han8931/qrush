@@ -7,6 +7,8 @@ import (
 )
 
 func TestSocketPathDefault(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("QRUSH_SOCKET", "")
 	t.Setenv("TS_SOCKET", "")
 	t.Setenv("TMPDIR", t.TempDir())
@@ -28,6 +30,8 @@ func TestSocketPathFromEnv(t *testing.T) {
 }
 
 func TestSocketPathFromLegacyEnv(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("QRUSH_SOCKET", "")
 	t.Setenv("TS_SOCKET", "/legacy/path.sock")
 	path := SocketPath()

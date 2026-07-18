@@ -609,3 +609,39 @@ func TestParseSessionUnknown(t *testing.T) {
 		t.Error("expected error for unknown session subcommand")
 	}
 }
+
+func TestParseConfigSubcommands(t *testing.T) {
+	cases := []struct {
+		args   []string
+		action Action
+		key    string
+		value  string
+	}{
+		{[]string{"config"}, ActionConfigList, "", ""},
+		{[]string{"config", "list"}, ActionConfigList, "", ""},
+		{[]string{"config", "get", "slots"}, ActionConfigGet, "slots", ""},
+		{[]string{"config", "set", "slots", "4"}, ActionConfigSet, "slots", "4"},
+		{[]string{"config", "set", "on_finish", "notify-send", "done"}, ActionConfigSet, "on_finish", "notify-send done"},
+		{[]string{"config", "edit"}, ActionConfigEdit, "", ""},
+		{[]string{"config", "path"}, ActionConfigPath, "", ""},
+	}
+	for _, tc := range cases {
+		cmd, err := Parse(tc.args)
+		if err != nil {
+			t.Fatalf("Parse(%v): %v", tc.args, err)
+		}
+		if cmd.Action != tc.action || cmd.EnvKey != tc.key || cmd.EnvValue != tc.value {
+			t.Errorf("Parse(%v) = action %v key %q value %q", tc.args, cmd.Action, cmd.EnvKey, cmd.EnvValue)
+		}
+	}
+
+	for _, bad := range [][]string{
+		{"config", "get"},
+		{"config", "set", "slots"},
+		{"config", "bogus"},
+	} {
+		if _, err := Parse(bad); err == nil {
+			t.Errorf("Parse(%v): expected error", bad)
+		}
+	}
+}

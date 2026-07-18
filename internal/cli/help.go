@@ -66,6 +66,13 @@ Serialization:
   -M <format>         Output format: default, json, tab
   --serialize <fmt>   Same as -M
 
+Configuration:
+  config [list]        Show every setting: value + source (default/file/env/runtime)
+  config get <key>     Print one setting's effective value
+  config set <key> <v> Write a setting to the config file (applies live when possible)
+  config edit          Open the config file in $EDITOR
+  config path          Print the config file path
+
 Environment:
   --getenv <var>      Get server environment variable
   --setenv <var=val>  Set server environment variable
@@ -82,11 +89,14 @@ Other:
 Environment variables:
   QRUSH_SOCKET        Socket path (default: $TMPDIR/qrush-socket.<uid>)
   QRUSH_SLOTS         Initial max slots (default: 1)
+  QRUSH_LOGDIR        Directory for job output files (default: $TMPDIR)
   QRUSH_MAXFINISHED   Max finished jobs to keep
   QRUSH_MAXCONN       Max client connections
   QRUSH_ONFINISH      Command to run on job completion
   QRUSH_SAVELIST      File to persist job queue
-Legacy TS_* names are still accepted as fallbacks.
+Legacy TS_* names are still accepted as fallbacks. The same settings can live
+in ~/.config/qrush/config (see 'ru config'); precedence is runtime overrides
+(settings changed live) > environment > config file > defaults.
 `)
 }
 

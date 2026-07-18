@@ -106,6 +106,15 @@ const (
 	// `ru --jobs` when it is launched from inside a qrush-hosted pane.
 	MsgRequestJobsView
 	MsgRequestJobsViewOK
+	// MsgSetJobLabel renames an existing job (sets its label) from the TUI's
+	// job-name edit box. Answered with MsgActionOK.
+	MsgSetJobLabel
+	// MsgTUIAttach registers the sender as the daemon's single active
+	// interactive TUI; the connection stays open for the TUI's lifetime.
+	// Attaching displaces any previously registered TUI, which is sent
+	// MsgTUITakenOver and disconnected (tmux `attach -d` semantics).
+	MsgTUIAttach
+	MsgTUITakenOver
 )
 
 type Msg struct {
@@ -152,6 +161,11 @@ type PayloadCount struct {
 }
 
 type PayloadLabel struct {
+	Label string
+}
+
+type PayloadSetLabel struct {
+	JobID int
 	Label string
 }
 
@@ -304,6 +318,7 @@ func init() {
 	gob.Register(PayloadSlots{})
 	gob.Register(PayloadCount{})
 	gob.Register(PayloadLabel{})
+	gob.Register(PayloadSetLabel{})
 	gob.Register(PayloadEnv{})
 	gob.Register(PayloadLogdir{})
 	gob.Register(PayloadListLine{})

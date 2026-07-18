@@ -124,6 +124,7 @@ func (e *Executor) Run(req ExecRequest) {
 
 	start := time.Now()
 
+	var ptyCopyDone chan struct{}
 	if usePTY {
 		var err error
 		ptmx, err = pty.Start(cmd)
@@ -133,7 +134,11 @@ func (e *Executor) Run(req ExecRequest) {
 			req.OnFinish(job.ID, protocol.Result{ExitCode: -1})
 			return
 		}
-		go io.Copy(outFile, ptmx)
+		ptyCopyDone = make(chan struct{})
+		go func() {
+			defer close(ptyCopyDone)
+			io.Copy(outFile, ptmx)
+		}()
 	} else {
 		if job.Info.StoreOutput {
 			cmd.Stdout = outFile
@@ -163,7 +168,17 @@ func (e *Executor) Run(req ExecRequest) {
 
 	e.processes.Delete(job.ID)
 	if ptmx != nil {
+		// The PTY master can still hold output the job wrote just before
+		// exiting; let the copier drain it (its Read errors out once the child
+		// side closes). Bound the wait in case a grandchild keeps the child
+		// side open, then close ptmx to force the copier's pending Read to
+		// fail — only after it returns is outFile safe to close.
+		select {
+		case <-ptyCopyDone:
+		case <-time.After(2 * time.Second):
+		}
 		ptmx.Close()
+		<-ptyCopyDone
 	}
 	if outFile != nil {
 		outFile.Close()

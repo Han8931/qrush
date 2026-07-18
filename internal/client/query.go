@@ -505,6 +505,23 @@ func GetLabel(id int) (string, error) {
 	return payload.Label, nil
 }
 
+// SetJobLabel renames an existing job (sets its label).
+func SetJobLabel(id int, label string) error {
+	c, err := Connect()
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+
+	if err := c.Send(&protocol.Msg{
+		Type:    protocol.MsgSetJobLabel,
+		Payload: protocol.PayloadSetLabel{JobID: id, Label: label},
+	}); err != nil {
+		return err
+	}
+	return recvOK(c)
+}
+
 func LastID() (int, error) {
 	c, err := Connect()
 	if err != nil {

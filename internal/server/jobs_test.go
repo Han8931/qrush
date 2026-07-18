@@ -1,6 +1,8 @@
 package server
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/han/qrush/internal/protocol"
@@ -172,6 +174,48 @@ func TestJobQueuePruneFinished(t *testing.T) {
 	}
 }
 
+func TestJobQueueRemoveDeletesGeneratedOutput(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "ru_0_abcd.out")
+	if err := os.WriteFile(out, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	q := NewJobQueue()
+	j := q.AddWithOutputPath(protocol.NewJobRequest{Command: "a", StoreOutput: true},
+		func(int, string) string { return out })
+	q.SetRunning(j.ID, 1, "")
+	q.MarkFinished(j.ID, protocol.Result{})
+
+	if !q.Remove(j.ID) {
+		t.Fatal("expected remove to succeed")
+	}
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Errorf("expected generated output file to be deleted, stat err=%v", err)
+	}
+}
+
+func TestJobQueueClearFinishedKeepsUserLogfile(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "custom.log")
+	if err := os.WriteFile(out, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	q := NewJobQueue()
+	j := q.AddWithOutputPath(protocol.NewJobRequest{Command: "a", StoreOutput: true, Logfile: out},
+		func(_ int, logfile string) string { return logfile })
+	q.SetRunning(j.ID, 1, "")
+	q.MarkFinished(j.ID, protocol.Result{})
+
+	if n := q.ClearFinished(); n != 1 {
+		t.Fatalf("expected 1 cleared, got %d", n)
+	}
+	if _, err := os.Stat(out); err != nil {
+		t.Errorf("user-specified logfile must survive clear: %v", err)
+	}
+}
+
 func TestJobQueueMakeUrgent(t *testing.T) {
 	q := NewJobQueue()
 	q.Add(protocol.NewJobRequest{Command: "a"})
@@ -300,9 +344,24 @@ func TestJobQueueNextRunnableNoSlots(t *testing.T) {
 	q := NewJobQueue()
 	q.Add(protocol.NewJobRequest{Command: "a", NumSlots: 2})
 
-	_, ok := q.NextRunnable(1, 0)
+	_, ok := q.NextRunnable(2, 1)
 	if ok {
-		t.Error("should not find runnable job when not enough slots")
+		t.Error("should not find runnable job when not enough free slots")
+	}
+}
+
+func TestJobQueueNextRunnableClampsToMaxSlots(t *testing.T) {
+	q := NewJobQueue()
+	q.Add(protocol.NewJobRequest{Command: "a", NumSlots: 4})
+
+	// Needing more slots than exist must not queue the job forever: it runs
+	// once the machine is fully idle.
+	if _, ok := q.NextRunnable(1, 1); ok {
+		t.Error("should not run an oversized job while any slot is busy")
+	}
+	j, ok := q.NextRunnable(1, 0)
+	if !ok || j.Info.Command != "a" {
+		t.Error("expected oversized job to be runnable on an idle queue")
 	}
 }
 

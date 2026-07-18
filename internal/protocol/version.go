@@ -1,3 +1,3 @@
 package protocol
 
-const ProtocolVersion = 5
+const ProtocolVersion = 7

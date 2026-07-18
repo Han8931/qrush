@@ -26,6 +26,59 @@ func shortSocketPath(t *testing.T) string {
 	return filepath.Join(dir, "qrush.sock")
 }
 
+// TestTUIAttachTakeover: registering a second interactive TUI displaces the
+// first — it is sent MsgTUITakenOver and its connection is closed — so two
+// TUIs never mirror the same panes.
+func TestTUIAttachTakeover(t *testing.T) {
+	sock := shortSocketPath(t)
+	t.Setenv("QRUSH_SOCKET", sock)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	srv, err := server.New(config.Load())
+	if err != nil {
+		t.Fatalf("server.New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go srv.Run(ctx)
+	t.Cleanup(func() { srv.Shutdown(); cancel() })
+
+	waitForSocket(t, sock)
+
+	first, err := client.AttachTUI()
+	if err != nil {
+		t.Fatalf("first AttachTUI: %v", err)
+	}
+	defer first.Close()
+
+	second, err := client.AttachTUI()
+	if err != nil {
+		t.Fatalf("second AttachTUI: %v", err)
+	}
+	defer second.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		msg, err := first.Recv()
+		if err != nil {
+			done <- err
+			return
+		}
+		if msg.Type != protocol.MsgTUITakenOver {
+			t.Errorf("expected MsgTUITakenOver, got %v", msg.Type)
+		}
+		done <- nil
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("first TUI should receive MsgTUITakenOver before disconnect, got error %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("first TUI was never notified of the takeover")
+	}
+}
+
 // TestTerminalPersistenceOverSocket drives the real client→daemon→PTY→stream
 // path over a unix socket: open a pane, run a command, detach, reattach, and
 // confirm the backlog still replays (persistence). Also checks layout get/set

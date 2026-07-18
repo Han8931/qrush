@@ -1,6 +1,6 @@
 # Binary
 /ru
-/ru.exe
+*.exe
 
 # Go build
 *.o
