@@ -318,33 +318,32 @@ func TestComputeJobColumns(t *testing.T) {
 
 func TestFormatJobRowWidth(t *testing.T) {
 	c := computeJobColumns(80)
-	row := formatJobRow(jobsFixture()[0], c)
+	row := formatJobRow(jobsFixture()[0], "work", c)
 	if w := len(stripAnsi(row)); w == 0 {
 		t.Fatal("empty row")
 	}
 }
 
-func TestComputeJobColumnsHasStartEnd(t *testing.T) {
+func TestComputeJobColumnsHasGroupSession(t *testing.T) {
 	c := computeJobColumns(120)
-	if c.start <= 0 || c.end <= 0 {
-		t.Fatalf("start/end columns must be positive, got start=%d end=%d", c.start, c.end)
+	if c.group <= 0 || c.session <= 0 {
+		t.Fatalf("group/session columns must be positive, got group=%d session=%d", c.group, c.session)
 	}
 }
 
-func TestFormatJobRowShowsTimes(t *testing.T) {
+func TestFormatJobRowShowsGroupAndSession(t *testing.T) {
 	j := protocol.JobInfo{
-		ID:        4,
-		Command:   "make",
-		State:     protocol.StateFinished,
-		StartTime: time.Date(2026, 5, 30, 9, 15, 30, 0, time.Local),
-		EndTime:   time.Date(2026, 5, 30, 9, 16, 0, 0, time.Local),
+		ID:      4,
+		Command: "make",
+		Session: "build",
+		State:   protocol.StateFinished,
 	}
-	row := stripAnsi(formatJobRow(j, computeJobColumns(120)))
-	if !strings.Contains(row, "09:15:30") {
-		t.Errorf("row missing start time: %q", row)
+	row := stripAnsi(formatJobRow(j, "ci", computeJobColumns(120)))
+	if !strings.Contains(row, "ci") {
+		t.Errorf("row missing group: %q", row)
 	}
-	if !strings.Contains(row, "09:16:00") {
-		t.Errorf("row missing end time: %q", row)
+	if !strings.Contains(row, "build") {
+		t.Errorf("row missing session: %q", row)
 	}
 }
 

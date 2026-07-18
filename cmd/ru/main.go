@@ -39,10 +39,10 @@ func main() {
 			fmt.Fprintf(os.Stderr, "ru: %v\n", err)
 			os.Exit(1)
 		}
-		// When `ru --jobs` is launched from inside a qrush-hosted pane, spawning
-		// a nested TUI would re-attach to the very session it runs in. Instead,
-		// ask the already-running interactive TUI to open its jobs view.
-		if cmd.Action == cli.ActionJobsView && os.Getenv("QRUSH_SESSION") != "" {
+		// When `ru` / `ru -S` / `ru --jobs` is launched from inside a qrush-hosted
+		// pane, spawning a nested TUI would open a session inside a session. Instead,
+		// ask the already-running interactive TUI to surface its management view.
+		if os.Getenv("QRUSH_SESSION") != "" {
 			if err := client.RequestJobsView(); err != nil {
 				fmt.Fprintf(os.Stderr, "ru: %v\n", err)
 				os.Exit(1)

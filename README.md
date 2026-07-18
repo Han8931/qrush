@@ -13,10 +13,11 @@ A cross-platform task spooler written in Go. Inspired by [task-spooler](https://
 - **PTY execution** — commands run attached to a pseudo-terminal so output stays line-buffered (no buffering surprises for long-running jobs)
 - **Labels & messages** — tag jobs with `-L`, attach a free-form note with `-m` (shown by `-c` and `-i`)
 - **Sessions** — group jobs into named sessions for organization
-- **Interactive TUI** — split-pane terminal with NERDTree-style session tree (`ru -S`)
-- **tmux-style panes** — split the terminal into tiled shells (`Ctrl+B |`/`-` or `:vs`/`:hs`), nest them, and navigate with the `Ctrl+B` prefix
-- **Job-management view** — full-screen, live, vim-keybound job table (`Ctrl+B j` / `:jobs`) with kill/remove/rerun/urgent actions, a built-in output pager, and a system hardware status bar (CPU/memory/load)
-- **Vim key bindings** — tree navigation with j/k, `Ctrl+W` + `hjkl` to move focus between the tree and panes, `,n` to toggle tree
+- **Interactive TUI** — bare `ru` opens a full-screen **management home**: a collapsible group → session → job list with live status, an output pager, and a hardware status bar (CPU/memory/load)
+- **Open sessions on demand** — press `Enter` on a session to drop into its tmux-style shell panes; `Ctrl+B d` detaches back to the management screen (shells persist in the daemon)
+- **tmux-style panes** — split a session's terminal into tiled shells (`Ctrl+B |`/`-` or `:vs`/`:hs`), nest them, and navigate with the `Ctrl+B` prefix
+- **Vim key bindings** — `j`/`k` to move, `h`/`l` to collapse/expand, `Ctrl+W` + `hjkl` to move focus between panes; `e`/`n` to edit or create sessions; job actions (kill/remove/rerun/urgent) inline
+- **Mouse support** — click to select/open rows on the management screen (disabled inside panes so terminal text-selection still works)
 - **Cross-platform** — Linux, macOS, Windows (single binary)
 - **Auto-start** — server daemon starts on first use, no setup needed
 - **JSON output** — machine-readable job listing
@@ -46,10 +47,13 @@ ru echo "hello world"
 ru sleep 10
 # 1
 
-# List all jobs
-ru
+# List all jobs (to stdout)
+ru -l
 # 0    finished     0s      echo hello world
 # 1    running      3s      sleep 10
+
+# Open the interactive management TUI (bare `ru`, no args)
+ru
 
 # View output of a finished job
 ru -c 0
@@ -73,7 +77,8 @@ ru [action] [-nEzf] [-m <msg>] [-L <label>] [-D <id,...>] [-W <id,...>]
 
 | Flag | Description |
 |------|-------------|
-| *(default)* | List all jobs |
+| *(default)* | Open the interactive management TUI (jobs & sessions) |
+| `-l` | List all jobs to stdout |
 | `[cmd...]` | Queue a command |
 | `-t [id]` | Tail output of a job (follows live) |
 | `-c [id]` | Show output of a job (follows running jobs until they finish; shows exit code if non-zero) |
@@ -95,8 +100,8 @@ ru [action] [-nEzf] [-m <msg>] [-L <label>] [-D <id,...>] [-W <id,...>]
 | `-R` | Count running jobs |
 | `-C` | Clear finished jobs |
 | `-K` | Kill the server |
-| `-S`, `tui` | Open interactive session tree (TUI) |
-| `-j`, `--jobs`, `tui -j` | Open the TUI directly in the job-management view |
+| `-S`, `tui` | Open the interactive management TUI (same as bare `ru`) |
+| `-j`, `--jobs`, `tui -j` | Open the TUI directly in jobs-only mode (`q` quits) |
 | `term ls` | List live interactive panes (`session  pane`) hosted by the daemon |
 | `term kill <session> <pane>` | Kill a persistent interactive pane |
 
@@ -142,68 +147,120 @@ ru session move ci work
 ru group list
 ```
 
-### Interactive TUI (`ru -S`)
+### Interactive TUI (`ru`)
 
-Opens a split-pane terminal: session tree on the left, an embedded shell on the right.
+Bare `ru` opens a full-screen **management home**: a flat, live-updating table of
+every job across all sessions, with **Group** and **Session** columns. A detail
+pane beneath the table shows the selected job in full, and a hardware status bar
+along the bottom shows system-wide CPU, memory, load average, and core count
+(updated every second).
 
 ```
-┌──────────────┬────────────────────────────────┐
-│ ▼ default    │ $ ru echo hello                │
-│   default    │ 0                              │
-│ ▶ work (2)   │ $ _                            │
-├──────────────┴────────────────────────────────┤
-│ INSERT default      ⎇ main  jobs 2  slots 1   │
-└───────────────────────────────────────────────┘
+╭───────────────────────────────────────────────────────────────────╮
+│   ID GROUP ▲   SESSION    STATE      TIME    COMMAND               │
+│    0 default   build      finished   0s      make all             │
+│    1 default   build      running    4s      make test            │
+│ ·    default   default    no jobs            — empty session · ⏎   │
+│ ·    work      deploy     no jobs            — empty session · ⏎   │
+│ ── job details ───────────────────────────────────────────────── │
+│ Command: make all   State: finished   Real time: 0s               │
+╰───────────────────────────────────────────────────────────────────╯
+ MANAGE  sort:group▲  sessions 3  run 1  queue 0  done 1  fail 0  …
+ HW   CPU 4%  MEM 2.6G/15.0G           load 1.11 1.35 1.13   12 cpu
 ```
 
-The status bar shows the current **mode** — `NORMAL` (navigating the tree),
-`INSERT` (typing in a shell pane), or `COMMAND` (a `:`/command prompt is open) —
-and, when the focused pane's working directory is a git repository, the current
-**branch** (`⎇ <branch>`) — it follows the pane as you `cd` around.
+Every session is listed: a session's jobs appear as rows, and a session with no
+jobs still gets one placeholder row (so nothing is hidden). Press **Enter** on any
+row to drop into that **session** — a tmux-style split of persistent shells (see
+below). `Ctrl+B d` detaches back to this screen. The bottom stat row shows session
+and job counts; the status bar shows the current **mode**: `MANAGE` (the table),
+`INSERT` (typing in a shell pane), or `COMMAND` (a `:` prompt is open); inside a
+session it also shows the focused pane's git **branch** (`⎇ <branch>`).
 
-**Key bindings:**
+Bare `ru` and `ru -S` both open this screen; `ru -j` opens it in **jobs-only**
+mode (where `q` quits instead of dropping to a session), and `ru -l` still just
+prints the job list to stdout. Mouse clicks select rows on this screen (mouse is
+released inside panes so terminal text-selection still works). Press `?` any time
+for a key/command cheatsheet.
 
-| Key | Context | Action |
-|-----|---------|--------|
-| `,n` | Any | Toggle tree panel |
-| `Ctrl+W` then `h`/`j`/`k`/`l` | Any | Move focus between the tree and adjacent terminal panes |
-| `Ctrl+W` then `w` | Any | Cycle focus through the tree and every pane |
-| `j`/`k` | Tree | Move cursor up/down |
-| `gg` / `G` | Tree | Jump to top / bottom |
-| `Enter`/`l` | Tree | Expand/collapse group or activate session |
-| `h` | Tree | Collapse / go to parent |
-| `Space` | Tree | Toggle selection for current row |
-| `v` | Tree | Toggle selection for all visible rows |
-| `a` | Tree | Create new session in selected group |
-| `M` | Tree | Create new group |
-| `A` | Tree | Toggle wide tree pane |
-| `r` | Tree | Reset selected/current session shell |
-| `d` | Tree | Delete selected/current session/group |
-| `R` | Tree | Rename selected session/group |
-| `m` | Tree (on session) | Move session to group |
-| `q` | Tree | Quit (or switch to shell) |
+**Management key bindings:**
+
+| Key | Action |
+|-----|--------|
+| `j`/`k`/`Space`, `gg`/`G`, `Ctrl+d`/`Ctrl+u` | Move / jump / half-page |
+| `Enter` | Open the cursor row's **session** (its shell panes) |
+| `o` | Open the output pager (scrollable; follows running jobs); press `i` there to overlay job info |
+| `S` | Open the **session picker** — lists every session, incl. empty ones |
+| `e` | Edit the cursor row's session (name + group) |
+| `n` / `a` | Create a new session (opens the edit box; you land in it) |
+| `s` | Cycle the sort field (group → id → state → time); `R` reverses it |
+| `/` | Filter by command/label/session (`Enter` apply, `Esc` cancel) |
+| `:` | Command line (see below) |
+| `?` | Show the help overlay |
+| `V` | Toggle visual mode; `j`/`k` extend the selection |
+| `x` / `u` / `r` | Kill / make urgent / rerun the selected job(s) |
+| `d` | Remove the selected job(s); finished jobs delete immediately, others confirm `y`/`n` |
+| `D` / `C` | Delete all finished jobs (no confirm / confirm `y`/`n`) |
+| `q` / `Esc` | Back to the open session, or quit (in `-j` mode, or with none open) |
+
+#### Command line (`:`)
+
+Press `:` to open a command line on the management screen:
+
+| Command | Action |
+|---------|--------|
+| `:set slots <n>` (or `:slots <n>`) | Set the number of parallel job slots |
+| `:set logdir <path>` | Set the daemon's log directory |
+| `:sort <group\|id\|state\|time>` | Set the sort field |
+| `:config` | Show current settings |
+| `:clear` | Clear finished jobs |
+| `:help` | Show the help overlay |
+| `:q` | Quit |
+
+#### Sessions & the session picker
+
+A **session** is a named workspace with its own shells and its own jobs; sessions
+are organized into **groups**. Every session shows in the table (empty ones as a
+placeholder row), so `Enter` opens whichever one the cursor is on. The **session
+picker** (`S`) gives a compact grouped list of every session — handy for jumping
+around or reaching a session you just made:
+
+```
+╭─ Sessions ───────────────────────────────╮
+│    default                               │
+│  ▌ build             1 jobs              │
+│    deploy            2 jobs              │
+│    work                                  │
+│    idle              0 jobs              │
+│  ⏎:open · e:edit · n:new · d:delete · esc │
+╰───────────────────────────────────────────╯
+```
+
+`e` (edit) and `n` (new) open a small modal to set a session's **name** and
+**group**; submitting renames/moves or creates it.
 
 #### Panes (tmux-style splits)
 
-The terminal pane can be split into multiple shells, tiled like tmux. Each split
-spawns a fresh shell for the current session; splits can be nested arbitrarily.
+Inside a session the terminal can be split into multiple shells, tiled like tmux.
+Each split spawns a fresh shell for that session; splits can be nested arbitrarily.
 Commands are reachable two ways: the `Ctrl+B` prefix (press `Ctrl+B`, release,
 then the key) and command mode (`Ctrl+B` then `c`, type the command, `Enter`).
 
-The shells run inside the background daemon, so they **persist across `ru -S`
-restarts**: quit the TUI and reopen it and your panes, their layout, and any
+The shells run inside the background daemon, so they **persist**: detach with
+`Ctrl+B d` (or quit and reopen `ru`) and your panes, their layout, and any
 still-running processes are reattached (recent scrollback is replayed). Panes
-live until you close them (`Ctrl+B x`), reset the session (`r`), or the daemon
-is stopped (`ru -K`).
+live until you close them (`Ctrl+B x`) or the daemon is stopped (`ru -K`).
 
 | Prefix | Command mode | Action |
 |--------|--------------|--------|
 | `Ctrl+B` `|` / `%` | `vs` / `vsplit` | Split focused pane vertically (side by side) |
 | `Ctrl+B` `-` / `"` | `hs` / `hsplit` / `split` | Split focused pane horizontally (stacked) |
 | `Ctrl+B` `o` | `o` / `next` | Cycle focus to the next pane |
-| `Ctrl+B` arrows / `h` `k` `l` | — | Move focus to the adjacent pane (`j` opens the job view) |
+| `Ctrl+B` arrows / `h` `k` `l` | — | Move focus to the adjacent pane |
+| `Ctrl+W` then `h`/`j`/`k`/`l` / `w` | — | Move / cycle focus between panes |
 | `Ctrl+B` `x` / `Ctrl+W` `q` | `x` / `close` | Close the focused pane (last pane is kept) |
-| `Ctrl+B` `j` | `jobs` / `j` | Open the job-management view |
+| `Ctrl+B` `d` | `detach` | Detach back to the management screen (shells persist) |
+| `Ctrl+B` `j` | `jobs` / `j` | Jump to the management screen |
 | `Ctrl+B` `c` | — | Open command mode |
 | `Ctrl+B` `q` | `q` / `quit` | Quit |
 
@@ -211,37 +268,11 @@ The `Ctrl+B` prefix stays active until the next key. Press `Esc` after `Ctrl+B`
 to cancel it. If the next key isn't a recognized chord, the buffered `Ctrl+B`
 is forwarded to the focused shell, so shell shortcuts still work.
 
-Activating a session sets `QRUSH_SESSION` in the embedded shell; `ru` uses it as the default session when `-g` is omitted. The embedded shell supports vi mode (`set -o vi`) — all keystrokes are forwarded directly.
-
-#### Job-management view
-
-Press `Ctrl+B j` (or run `:jobs` / `:j` in command mode) to open a full-screen,
-live-updating table of jobs with vim keybindings. A fixed pane beneath the table
-always shows full details for the selected job, and a hardware status bar along
-the very bottom shows system-wide CPU, memory, load average, and core count
-(updated every second). `q`/`Esc` returns to the split view.
-
-You can also open it from a shell with `ru --jobs` (alias `ru -j`). Run from an
-ordinary terminal it launches a standalone job table that `q`/`Esc` simply
-closes. Run from *inside* a qrush pane it instead signals the already-running
-interactive session to switch to its jobs view (rather than nesting a second TUI
-on top of itself).
-
-| Key | Action |
-|-----|--------|
-| `j`/`k`/`Space`, `gg`/`G`, `Ctrl+d`/`Ctrl+u` | Move / jump / half-page |
-| `a` | Toggle scope: all sessions ↔ active session |
-| `/` | Filter by command/label/session (`Enter` apply, `Esc` cancel) |
-| `Enter` / `o` | Open the output pager (scrollable; follows running jobs); press `i` there to overlay job info |
-| `V` | Toggle visual mode; `j`/`k` extend the selection |
-| `d` | Remove the selected job(s); finished jobs delete immediately, others confirm `y`/`n` |
-| `r` | Rerun the selected job(s) as fresh jobs |
-| `x` | Kill the selected job(s) |
-| `u` | Make the selected job(s) urgent |
-| `D` | Delete all finished jobs immediately (no confirmation) |
-| `C` | Clear all finished jobs (confirm `y`/`n`) |
-| `Esc` | Exit visual mode, or close the view |
-| `q` | Close the view |
+Activating a session sets `QRUSH_SESSION` in the embedded shell; `ru` uses it as
+the default session when `-g` is omitted. Running `ru` (or `ru -j`) from *inside*
+a pane won't nest a second TUI — it surfaces the already-running management screen
+instead, so you never open a session inside a session. The embedded shell supports
+vi mode (`set -o vi`) — all keystrokes are forwarded directly.
 
 In the output pager: `j`/`k`, `gg`/`G`, `Ctrl+d`/`Ctrl+u` scroll, `/` then
 `n`/`N` search, `i` toggles a job-info panel, `G` re-follows a running job,

@@ -68,16 +68,13 @@ func TestGitBranchWorktreePointer(t *testing.T) {
 }
 
 func TestModeName(t *testing.T) {
-	if (model{focus: paneTree}).modeName() != "NORMAL" {
-		t.Error("tree focus should be NORMAL")
-	}
 	if (model{focus: paneTerm}).modeName() != "INSERT" {
 		t.Error("terminal focus should be INSERT")
 	}
 	if (model{focus: paneTerm, inputMode: inputCommand}).modeName() != "COMMAND" {
 		t.Error("command input should be COMMAND")
 	}
-	if (model{focus: paneTree, inputMode: inputCreate}).modeName() != "COMMAND" {
+	if (model{focus: paneTerm, inputMode: inputCreate}).modeName() != "COMMAND" {
 		t.Error("text input should be COMMAND")
 	}
 }

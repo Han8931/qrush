@@ -19,8 +19,7 @@ import (
 type pane int
 
 const (
-	paneTree pane = iota
-	paneTerm
+	paneTerm pane = iota
 )
 
 type model struct {
@@ -34,18 +33,13 @@ type model struct {
 	ctrlBTimer   int
 	nextPaneID   int
 
-	nodes []treeNode
-	// sessionExpanded tracks, by session name, whether the management view
-	// shows that session's jobs nested beneath it. Group-level expansion lives
-	// on treeNode.expanded; sessions need their own flag because the protocol
-	// SessionInfo type can't carry UI state.
-	sessionExpanded map[string]bool
-	maxSlots        int
-	err             error
-	status          string
-	inputMode       inputKind
-	textInput       textinput.Model
-	cmdInput        textinput.Model
+	nodes     []treeNode
+	maxSlots  int
+	err       error
+	status    string
+	inputMode inputKind
+	textInput textinput.Model
+	cmdInput  textinput.Model
 
 	// layouts holds each session's split-layout tree (tmux-style tiling).
 	// panes is a flat id→shell registry used for PTY event routing. shell and
@@ -56,6 +50,10 @@ type model struct {
 	shell         *shellState
 	activeSession string
 	gitBranch     string
+
+	// pendingOpen names a session just created via the management form that
+	// should be opened as soon as it appears in the next tree refresh.
+	pendingOpen string
 
 	// viewMode selects the top-level screen: the normal split view or the
 	// full-screen job-management modal. jobs holds that modal's state.
@@ -150,18 +148,17 @@ func newModel(sh *shellState) model {
 		layouts[activeSession] = focusPane
 	}
 	return model{
-		textInput:       ti,
-		cmdInput:        ci,
-		focus:           paneTerm,
-		sessionExpanded: make(map[string]bool),
-		layouts:         layouts,
-		panes:           panes,
-		focusPane:       focusPane,
-		nextPaneID:      nextPaneID,
-		shell:           sh,
-		activeSession:   activeSession,
-		gitBranch:       currentGitBranch(),
-		hwMon:           sysmon.New(),
+		textInput:     ti,
+		cmdInput:      ci,
+		focus:         paneTerm,
+		layouts:       layouts,
+		panes:         panes,
+		focusPane:     focusPane,
+		nextPaneID:    nextPaneID,
+		shell:         sh,
+		activeSession: activeSession,
+		gitBranch:     currentGitBranch(),
+		hwMon:         sysmon.New(),
 	}
 }
 
@@ -240,7 +237,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.maxSlots = msg.maxSlots
-		m.pruneSessionExpanded()
+		// A session just created via the management form: open it now that it
+		// exists so the user lands in the session they made.
+		if m.pendingOpen != "" && m.sessionExists(m.pendingOpen) {
+			name := m.pendingOpen
+			m.pendingOpen = ""
+			nm, cmd := m.openSession(name)
+			return nm, tea.Batch(cmd, clearScreenCmd(), tea.DisableMouse)
+		}
 		// Another client (`ru --jobs` from inside a pane) asked us to open the
 		// jobs view. Honour it only from the split view so we don't disturb a
 		// pager or an already-open table.
@@ -744,65 +748,6 @@ func (m model) focusDirPane(dir splitDir, forward bool) (model, tea.Cmd) {
 		m.focus = paneTerm
 	}
 	return m, nil
-}
-
-// pruneSessionExpanded drops expansion state for sessions that no longer exist.
-func (m *model) pruneSessionExpanded() {
-	if len(m.sessionExpanded) == 0 {
-		return
-	}
-	live := make(map[string]bool)
-	for _, n := range m.nodes {
-		for _, s := range n.sessions {
-			live[s.Name] = true
-		}
-	}
-	for name := range m.sessionExpanded {
-		if !live[name] {
-			delete(m.sessionExpanded, name)
-		}
-	}
-}
-
-func (m model) resetSessionShell(session string) (model, tea.Cmd) {
-	if session == "" {
-		session = m.activeSession
-	}
-	if root := m.layouts[session]; root != nil {
-		for _, leaf := range root.leaves() {
-			if leaf.shell != nil {
-				delete(m.panes, leaf.shell.id)
-				leaf.shell.destroy()
-			}
-		}
-		delete(m.layouts, session)
-	}
-	if session != m.activeSession {
-		m.status = fmt.Sprintf("reset session %s", session)
-		// Clear the stale daemon layout and reap any leftover panes.
-		return m, tea.Batch(clearScreenCmd(), persistLayoutCmd(session, nil))
-	}
-	cols, rows := m.paneSpawnSize()
-	name, err := client.OpenTerminal(session, cols, rows)
-	if err != nil {
-		m.status = fmt.Sprintf("error: %v", err)
-		return m, nil
-	}
-	sh, err := spawnShellPane(cols, rows, session, name)
-	if err != nil {
-		m.status = fmt.Sprintf("error: %v", err)
-		return m, nil
-	}
-	sh.id = m.nextPaneID
-	m.nextPaneID++
-	m.panes[sh.id] = sh
-	leaf := newLeaf(sh)
-	m.layouts[session] = leaf
-	m.focusPane = leaf
-	m.shell = sh
-	go sh.readLoop()
-	m.status = fmt.Sprintf("reset session %s", session)
-	return m, tea.Batch(waitForPTYOutput(sh.id, sh.ptyCh), clearScreenCmd(), persistLayoutCmd(session, leaf))
 }
 
 func (m model) handleTermKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1384,6 +1329,18 @@ func truncateToWidth(s string, width int) string {
 	return padRight(b.String(), width)
 }
 
+// sessionExists reports whether a session by that name is present in the tree.
+func (m model) sessionExists(name string) bool {
+	for _, n := range m.nodes {
+		for _, s := range n.sessions {
+			if s.Name == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func createSession(name string) tea.Cmd {
 	return func() tea.Msg {
 		err := client.SessionCreate(name)
@@ -1400,9 +1357,13 @@ func createSessionInGroup(name, group string) tea.Cmd {
 			return actionDoneMsg{err: err}
 		}
 		if group != "" && group != "default" {
+			// The group may not exist yet; create it first (ignoring an
+			// "already exists" error) so the move below can land.
+			_ = client.GroupCreate(group)
 			if err := client.SessionMove(name, group); err != nil {
 				return actionDoneMsg{err: err}
 			}
+			return actionDoneMsg{status: fmt.Sprintf("created session %q in group %q", name, group)}
 		}
 		return actionDoneMsg{status: fmt.Sprintf("created session %q", name)}
 	}
@@ -1463,6 +1424,9 @@ func editSession(oldName, newName, oldGroup, newGroup string) tea.Cmd {
 			g := newGroup
 			if g == "" {
 				g = "default"
+			}
+			if g != "default" {
+				_ = client.GroupCreate(g) // create the target group if missing
 			}
 			if err := client.SessionMove(cur, g); err != nil {
 				return actionDoneMsg{err: err}

@@ -7,18 +7,19 @@ func ShowHelp() {
                   [-N <num>] [-O <file>] [-P <num>] [cmd...]
 
 Actions:
-  (default)           List jobs
+  (default)           Open the interactive TUI (jobs & sessions view)
   [cmd...]            Queue a command
   -K                  Kill the server
   -C                  Clear finished jobs
-  -l                  List jobs (default)
+  -l                  List jobs to stdout
   -t [id]             Tail output of a job
   -c [id]             Cat (show all) output of a job
   -o [id]             Show output file path
   -p [id]             Show PID of a running job
   -i [id]             Show detailed info about a job
   -s [id]             Show state of a job
-  -r [id]             Remove a finished job
+  -r [id]             Rerun a job (re-enqueue the same command)
+  -x [id]             Remove a job from the queue
   -w [id]             Wait for a job to finish
   -k [id]             Kill a running job
   -T                  Kill all running jobs
@@ -29,7 +30,8 @@ Actions:
   -F [id]             Show full command
   -q                  Show last queued job ID
   -R                  Count running jobs
-  -S                  Interactive session tree (TUI)
+  -S, tui             Open the interactive TUI (jobs & sessions view)
+  -j, --jobs          Open the TUI directly in jobs-only view
 
 Sessions:
   session list         List all sessions

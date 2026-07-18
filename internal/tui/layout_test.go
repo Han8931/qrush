@@ -131,8 +131,6 @@ func TestCtrlWPaneNavigation(t *testing.T) {
 	m := model{
 		width:         80,
 		height:        24,
-		treeVisible:   true,
-		treeWidth:     20,
 		focus:         paneTerm,
 		activeSession: "default",
 		layouts:       map[string]*paneNode{"default": root},
@@ -151,15 +149,13 @@ func TestCtrlWPaneNavigation(t *testing.T) {
 		t.Fatal("ctrl+w h should move back to the left pane")
 	}
 
+	// The tree is gone, so ctrl+w h from the leftmost pane is a no-op: focus
+	// stays on the leftmost pane and the terminal keeps focus.
 	m.focusPane = leftLeaf
 	m.shell = leftLeaf.shell
 	m4 := m.ctrlWLeft()
-	if m4.focus != paneTree {
-		t.Fatal("ctrl+w h from the leftmost pane should focus the tree")
-	}
-
-	if m5 := m4.ctrlWRight(); m5.focus != paneTerm {
-		t.Fatal("ctrl+w l from the tree should focus the terminal")
+	if m4.focusPane != leftLeaf || m4.focus != paneTerm {
+		t.Fatal("ctrl+w h from the leftmost pane should stay on the leftmost pane")
 	}
 }
 
@@ -171,9 +167,7 @@ func TestCtrlWCycle(t *testing.T) {
 	m := model{
 		width:         80,
 		height:        24,
-		treeVisible:   true,
-		treeWidth:     20,
-		focus:         paneTree,
+		focus:         paneTerm,
 		activeSession: "default",
 		layouts:       map[string]*paneNode{"default": root},
 		panes:         map[int]*shellState{1: leftLeaf.shell, 2: right.shell},
@@ -181,18 +175,14 @@ func TestCtrlWCycle(t *testing.T) {
 		shell:         leftLeaf.shell,
 	}
 
-	// tree -> first pane -> second pane -> tree
-	m = m.ctrlWCycle()
-	if m.focus != paneTerm || m.focusPane != leftLeaf {
-		t.Fatal("cycle from tree should focus the first pane")
-	}
+	// first pane -> second pane -> wrap back to first pane
 	m = m.ctrlWCycle()
 	if m.focusPane != right {
 		t.Fatal("cycle should advance to the second pane")
 	}
 	m = m.ctrlWCycle()
-	if m.focus != paneTree {
-		t.Fatal("cycle past the last pane should return to the tree")
+	if m.focusPane != leftLeaf {
+		t.Fatal("cycle past the last pane should wrap to the first pane")
 	}
 }
 
