@@ -77,6 +77,7 @@ type Result struct {
 	SystemTimeMS int64
 	RealTimeMS   int64
 	Skipped      bool
+	TimedOut     bool // killed because it exceeded the job's --timeout
 }
 
 type JobInfo struct {
@@ -97,6 +98,9 @@ type JobInfo struct {
 	EnqueueTime    time.Time
 	StartTime      time.Time
 	EndTime        time.Time
+	TimeoutMS      int64 // kill the job after this wall-clock time (0: none)
+	Retries        int   // extra attempts allowed after a failure
+	Attempt        int   // retries used so far (0 on the first run)
 }
 
 type SessionInfo struct {
@@ -119,4 +123,6 @@ type NewJobRequest struct {
 	Message        string
 	NumSlots       int
 	Logfile        string
+	TimeoutMS      int64
+	Retries        int
 }

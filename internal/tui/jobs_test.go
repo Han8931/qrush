@@ -88,11 +88,14 @@ func TestJobEditFormFields(t *testing.T) {
 	if !f.active || f.jobID != 7 {
 		t.Fatalf("expected active job-edit form for job 7, got %+v", f)
 	}
-	if n := len((&f).inputs()); n != 3 {
-		t.Fatalf("expected 3 fields on a job row, got %d", n)
+	if n := len((&f).inputs()); n != 4 {
+		t.Fatalf("expected 4 fields on a job row (name/session/group/timeout), got %d", n)
 	}
 	if f.labelInput.Value() != "lbl" || f.nameInput.Value() != "work" || f.groupInput.Value() != "grp" {
 		t.Errorf("form not prefilled: %q %q %q", f.labelInput.Value(), f.nameInput.Value(), f.groupInput.Value())
+	}
+	if f.timeoutInput.Value() != "" {
+		t.Errorf("timeout should default to none (empty), got %q", f.timeoutInput.Value())
 	}
 
 	got, _ = fm.handleJobsKey(tea.KeyMsg{Type: tea.KeyDown})

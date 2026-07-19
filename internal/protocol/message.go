@@ -119,6 +119,9 @@ const (
 	// drops every job/session/group (defaults kept), and restores default
 	// runtime settings. Answered with MsgActionOK.
 	MsgReset
+	// MsgSetJobTimeout changes a job's wall-clock timeout (0 clears it). It
+	// takes effect when the job (re)starts. Answered with MsgActionOK.
+	MsgSetJobTimeout
 )
 
 type Msg struct {
@@ -171,6 +174,11 @@ type PayloadLabel struct {
 type PayloadSetLabel struct {
 	JobID int
 	Label string
+}
+
+type PayloadSetTimeout struct {
+	JobID     int
+	TimeoutMS int64
 }
 
 type PayloadEnv struct {
@@ -323,6 +331,7 @@ func init() {
 	gob.Register(PayloadCount{})
 	gob.Register(PayloadLabel{})
 	gob.Register(PayloadSetLabel{})
+	gob.Register(PayloadSetTimeout{})
 	gob.Register(PayloadEnv{})
 	gob.Register(PayloadLogdir{})
 	gob.Register(PayloadListLine{})

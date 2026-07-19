@@ -213,6 +213,8 @@ func (s *Server) dispatch(ctx context.Context, conn net.Conn, msg *protocol.Msg)
 		return s.handleGetLabel(conn, msg)
 	case protocol.MsgSetJobLabel:
 		return s.handleSetJobLabel(conn, msg)
+	case protocol.MsgSetJobTimeout:
+		return s.handleSetJobTimeout(conn, msg)
 	case protocol.MsgLastID:
 		return s.handleLastID(conn)
 	case protocol.MsgGetCmd:
@@ -500,6 +502,17 @@ func (s *Server) handleSetJobLabel(conn net.Conn, msg *protocol.Msg) bool {
 		return s.sendError(conn, err.Error())
 	}
 	if !s.jobs.SetLabel(payload.JobID, payload.Label) {
+		return s.sendError(conn, "job not found")
+	}
+	return s.sendMsg(conn, &protocol.Msg{Type: protocol.MsgActionOK})
+}
+
+func (s *Server) handleSetJobTimeout(conn net.Conn, msg *protocol.Msg) bool {
+	payload, err := protocol.PayloadAs[protocol.PayloadSetTimeout](msg)
+	if err != nil {
+		return s.sendError(conn, err.Error())
+	}
+	if !s.jobs.SetTimeout(payload.JobID, payload.TimeoutMS) {
 		return s.sendError(conn, "job not found")
 	}
 	return s.sendMsg(conn, &protocol.Msg{Type: protocol.MsgActionOK})

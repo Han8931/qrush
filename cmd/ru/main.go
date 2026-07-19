@@ -49,6 +49,23 @@ func main() {
 			os.Exit(1)
 		}
 		return
+	case cli.ActionUpgrade:
+		// Bypasses the version check by design: its whole job is dealing with
+		// a daemon from an older binary.
+		if err := doUpgrade(); err != nil {
+			fmt.Fprintf(os.Stderr, "ru: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	case cli.ActionKillServer:
+		// -K must neither auto-start a daemon just to kill it, nor go through
+		// the version check — it is the remedy the version-mismatch error
+		// prescribes, so it has to work against any daemon.
+		if err := client.KillServer(); err != nil {
+			fmt.Fprintln(os.Stderr, "ru: no running daemon")
+			return
+		}
+		return
 	case cli.ActionInteractive, cli.ActionJobsView:
 		if err := client.EnsureServer(); err != nil {
 			fmt.Fprintf(os.Stderr, "ru: %v\n", err)
@@ -154,8 +171,6 @@ func dispatch(cmd *cli.Command) error {
 		return doQueue(cmd)
 	case cli.ActionForeground:
 		return doForeground(cmd)
-	case cli.ActionKillServer:
-		return client.KillServer()
 	case cli.ActionClearFinished:
 		if cmd.Session != "" {
 			return client.ClearFinishedInSession(cmd.Session)
@@ -384,6 +399,8 @@ func doQueue(cmd *cli.Command) error {
 		Message:        cmd.Message,
 		NumSlots:       cmd.NumSlots,
 		Logfile:        cmd.Logfile,
+		TimeoutMS:      cmd.TimeoutMS,
+		Retries:        cmd.Retries,
 	}
 
 	id, err := client.SubmitJob(cmd.Command, opts)
@@ -426,6 +443,8 @@ func doForeground(cmd *cli.Command) error {
 		Message:        cmd.Message,
 		NumSlots:       cmd.NumSlots,
 		Logfile:        cmd.Logfile,
+		TimeoutMS:      cmd.TimeoutMS,
+		Retries:        cmd.Retries,
 	}
 
 	id, err := client.SubmitJob(cmd.Command, opts)
@@ -448,6 +467,37 @@ func doForeground(cmd *cli.Command) error {
 	if result.ExitCode != 0 {
 		os.Exit(result.ExitCode)
 	}
+	return nil
+}
+
+// doUpgrade retires a daemon left running by an older binary — but only when
+// that costs nothing: if it still has running jobs or live panes it is left
+// alone with a note. Safe to run unconditionally after every build (the
+// Makefile does), and always exits 0 so it never fails a build.
+func doUpgrade() error {
+	version, ok := client.ProbeServerVersion()
+	if !ok {
+		fmt.Printf("no daemon running — the next ru command starts one at v%d\n", protocol.ProtocolVersion)
+		return nil
+	}
+	if version == protocol.ProtocolVersion {
+		fmt.Printf("daemon already current (protocol v%d)\n", version)
+		return nil
+	}
+
+	running, rErr := client.CountRunning()
+	terms, tErr := client.ListTerminals()
+	if rErr != nil || tErr != nil || running > 0 || len(terms) > 0 {
+		fmt.Printf("daemon v%d is busy (%d running job(s), %d pane(s)) — leaving it; run `ru -K` when its work is done\n",
+			version, running, len(terms))
+		return nil
+	}
+
+	if err := client.KillServer(); err != nil {
+		return fmt.Errorf("stop stale daemon: %w", err)
+	}
+	client.WaitServerStop()
+	fmt.Printf("stale daemon (v%d) stopped — the next ru command starts one at v%d\n", version, protocol.ProtocolVersion)
 	return nil
 }
 

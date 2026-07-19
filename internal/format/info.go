@@ -22,6 +22,13 @@ func FormatJobInfo(j *protocol.JobInfo) string {
 		fmt.Fprintf(&b, "Message:    %s\n", j.Message)
 	}
 
+	if j.TimeoutMS > 0 {
+		fmt.Fprintf(&b, "Timeout:    %s\n", Duration(j.TimeoutMS))
+	}
+	if j.Retries > 0 {
+		fmt.Fprintf(&b, "Attempts:   %d/%d\n", j.Attempt+1, j.Retries+1)
+	}
+
 	if !j.EnqueueTime.IsZero() {
 		fmt.Fprintf(&b, "Enqueued:   %s\n", j.EnqueueTime.Format("2006-01-02 15:04:05"))
 	}

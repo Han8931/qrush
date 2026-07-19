@@ -171,28 +171,43 @@ type pickerRow struct {
 // creating) it edits the session's name + group; on a job row it grows a job
 // name field on top, so one box edits everything about the row.
 type sessionForm struct {
-	active      bool
-	creating    bool // blank form → SessionCreate; else rename/move
-	groupRename bool // single-field variant: rename the group in origName
-	jobID       int  // >= 0: job row — show the job-name field; -1 otherwise
-	origLabel   string
-	origName    string
-	origGroup   string
-	labelInput  textinput.Model // job name; only rendered when jobID >= 0
-	nameInput   textinput.Model // session name
-	groupInput  textinput.Model
-	focusField  int // index into inputs(): [job name,] session, group
+	active       bool
+	creating     bool // blank form → SessionCreate; else rename/move
+	groupRename  bool // single-field variant: rename the group in origName
+	jobID        int  // >= 0: job row — show the job-name field; -1 otherwise
+	origLabel    string
+	origName     string
+	origGroup    string
+	origTimeout  string
+	labelInput   textinput.Model // job name; only rendered when jobID >= 0
+	nameInput    textinput.Model // session name
+	groupInput   textinput.Model
+	timeoutInput textinput.Model // job timeout duration; empty = none
+	focusField   int             // index into inputs()
+}
+
+// fields returns the form's field labels in focus order.
+func (f *sessionForm) fields() []string {
+	switch {
+	case f.groupRename:
+		return []string{"name"}
+	case f.jobID >= 0:
+		return []string{"name", "session", "group", "timeout"}
+	default:
+		return []string{"name", "group"}
+	}
 }
 
 // inputs returns pointers to the form's visible fields in focus order.
 func (f *sessionForm) inputs() []*textinput.Model {
-	if f.groupRename {
+	switch {
+	case f.groupRename:
 		return []*textinput.Model{&f.nameInput}
+	case f.jobID >= 0:
+		return []*textinput.Model{&f.labelInput, &f.nameInput, &f.groupInput, &f.timeoutInput}
+	default:
+		return []*textinput.Model{&f.nameInput, &f.groupInput}
 	}
-	if f.jobID >= 0 {
-		return []*textinput.Model{&f.labelInput, &f.nameInput, &f.groupInput}
-	}
-	return []*textinput.Model{&f.nameInput, &f.groupInput}
 }
 
 // setFocus focuses field i (wrapping) and blurs the rest.
@@ -209,9 +224,10 @@ func (f *sessionForm) setFocus(i int) {
 	}
 }
 
-// groupFocused reports whether the group field (always last) has focus.
+// groupFocused reports whether the group field has focus.
 func (f *sessionForm) groupFocused() bool {
-	return !f.groupRename && f.focusField == len(f.inputs())-1
+	fs := f.fields()
+	return f.focusField < len(fs) && fs[f.focusField] == "group"
 }
 
 type pagerState struct {
@@ -232,7 +248,7 @@ type pagerState struct {
 }
 
 type columnWidths struct {
-	id, group, session, state, tm, name, command int
+	id, group, session, state, tm, timeout, name, command int
 }
 
 type jobsGTimeoutMsg struct{ id int }
@@ -518,9 +534,11 @@ func clampScroll(offset, bodyH, total int) int {
 }
 
 func computeJobColumns(inner int) columnWidths {
-	c := columnWidths{id: 5, group: 10, session: 12, state: 11, tm: 8, name: 14}
-	const sep = 8 // three spaces after ID, single space between the other columns
-	fixedNoCmd := func() int { return c.id + c.group + c.session + c.state + c.tm + c.name + sep }
+	c := columnWidths{id: 5, group: 10, session: 12, state: 11, tm: 8, timeout: 8, name: 14}
+	const sep = 9 // three spaces after ID, single space between the other columns
+	fixedNoCmd := func() int {
+		return c.id + c.group + c.session + c.state + c.tm + c.timeout + c.name + sep
+	}
 	c.command = inner - fixedNoCmd()
 	if c.command < 10 {
 		// Reclaim room from the widest text columns first.
@@ -580,9 +598,26 @@ func renderJobsRow(j protocol.JobInfo, group string, c columnWidths, bg lipgloss
 	sess := cell(j.Session, c.session, sessionStyle)
 	state := cell(stateTxt, c.state, stateStyle)
 	tm := cell(timeStr, c.tm, lipgloss.NewStyle())
+	timeoutTxt, timeoutStyle := "-", treeEmptyStyle
+	if j.TimeoutMS > 0 {
+		timeoutTxt, timeoutStyle = durationCompact(time.Duration(j.TimeoutMS)*time.Millisecond), queuedStyle
+	}
+	timeout := cell(timeoutTxt, c.timeout, timeoutStyle)
 	name := cell(nameTxt, c.name, nameStyle)
 	command := cell(j.Command, c.command, lipgloss.NewStyle())
-	return id + sep + sep + sep + grp + sep + sess + sep + state + sep + tm + sep + name + sep + command
+	return id + sep + sep + sep + grp + sep + sess + sep + state + sep + tm + sep + timeout + sep + name + sep + command
+}
+
+// durationCompact renders a duration without trailing zero units (30m0s → 30m).
+func durationCompact(d time.Duration) string {
+	s := d.String()
+	if strings.HasSuffix(s, "m0s") {
+		s = strings.TrimSuffix(s, "0s")
+	}
+	if strings.HasSuffix(s, "h0m") {
+		s = strings.TrimSuffix(s, "0m")
+	}
+	return s
 }
 
 // padRowBg extends a highlighted row's background to the full inner width. For
@@ -622,6 +657,7 @@ func (m model) jobsHeaderRow(c columnWidths) string {
 		fitToWidth("SESSION", c.session) + " " +
 		fitToWidth(mark("STATE", m.jobs.sortMode == sortByState), c.state) + " " +
 		fitToWidth(mark("TIME", m.jobs.sortMode == sortByTime), c.tm) + " " +
+		fitToWidth("TIMEOUT", c.timeout) + " " +
 		fitToWidth("NAME", c.name) + " " +
 		fitToWidth("COMMAND", c.command)
 	return treeSummaryStyle.Render(row)
@@ -1186,15 +1222,21 @@ func (m model) openGroupRenameForm(name string) model {
 func (m model) openJobEditForm(j protocol.JobInfo, group string) model {
 	li := formInput(j.Label)
 	li.Focus()
+	timeout := ""
+	if j.TimeoutMS > 0 {
+		timeout = durationCompact(time.Duration(j.TimeoutMS) * time.Millisecond)
+	}
 	m.jobs.form = sessionForm{
-		active:     true,
-		jobID:      j.ID,
-		origLabel:  j.Label,
-		origName:   j.Session,
-		origGroup:  group,
-		labelInput: li,
-		nameInput:  formInput(j.Session),
-		groupInput: formInput(group),
+		active:       true,
+		jobID:        j.ID,
+		origLabel:    j.Label,
+		origName:     j.Session,
+		origGroup:    group,
+		origTimeout:  timeout,
+		labelInput:   li,
+		nameInput:    formInput(j.Session),
+		groupInput:   formInput(group),
+		timeoutInput: formInput(timeout),
 	}
 	return m
 }
@@ -1280,6 +1322,18 @@ func (m model) submitSessionForm() (tea.Model, tea.Cmd) {
 		if label := strings.TrimSpace(f.labelInput.Value()); label != f.origLabel {
 			cmds = append(cmds, setJobLabelCmd(f.jobID, label))
 		}
+		if timeout := strings.TrimSpace(f.timeoutInput.Value()); timeout != f.origTimeout {
+			var ms int64
+			if timeout != "" && !strings.EqualFold(timeout, "none") {
+				d, err := time.ParseDuration(timeout)
+				if err != nil || d <= 0 {
+					m.status = fmt.Sprintf("invalid timeout %q (e.g. 30m, 90s)", timeout)
+					return m, nil
+				}
+				ms = d.Milliseconds()
+			}
+			cmds = append(cmds, setJobTimeoutCmd(f.jobID, ms))
+		}
 	}
 	if name != f.origName || group != f.origGroup {
 		cmds = append(cmds, editSession(f.origName, name, f.origGroup, group))
@@ -1288,6 +1342,18 @@ func (m model) submitSessionForm() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m, tea.Batch(cmds...)
+}
+
+func setJobTimeoutCmd(id int, ms int64) tea.Cmd {
+	return func() tea.Msg {
+		if err := client.SetJobTimeout(id, ms); err != nil {
+			return actionDoneMsg{err: err}
+		}
+		if ms <= 0 {
+			return actionDoneMsg{status: fmt.Sprintf("job %d timeout cleared", id)}
+		}
+		return actionDoneMsg{status: fmt.Sprintf("job %d timeout set to %s", id, durationCompact(time.Duration(ms)*time.Millisecond))}
+	}
 }
 
 func setJobLabelCmd(id int, label string) tea.Cmd {
@@ -2088,9 +2154,10 @@ func renderSessionRow(group, session string, c columnWidths, bg lipgloss.Termina
 	sess := cell(session, c.session, sessionStyle)
 	state := cell("no jobs", c.state, treeEmptyStyle)
 	tm := cell("", c.tm, lipgloss.NewStyle())
+	timeout := cell("", c.timeout, lipgloss.NewStyle())
 	name := cell("", c.name, lipgloss.NewStyle())
 	command := cell("— empty session · ⏎ to open", c.command, treeEmptyStyle)
-	return id + sep + sep + sep + grp + sep + sess + sep + state + sep + tm + sep + name + sep + command
+	return id + sep + sep + sep + grp + sep + sess + sep + state + sep + tm + sep + timeout + sep + name + sep + command
 }
 
 // modalInnerWidth picks a modal's inner width: a comfortable fixed size that
@@ -2183,13 +2250,7 @@ func (m model) sessionFormLines(bodyH, inner int) []string {
 		return marker + lbl + "  " + ti.View()
 	}
 
-	labels := []string{"name", "group"}
-	switch {
-	case f.groupRename:
-		labels = []string{"name"}
-	case f.jobID >= 0:
-		labels = []string{"name", "session", "group"}
-	}
+	labels := (&f).fields()
 	inputs := (&f).inputs()
 	content := []string{""}
 	for i, lbl := range labels {
@@ -2360,21 +2421,26 @@ func (m model) renderHWBar(w int) string {
 			style = airlineError
 		}
 		memText := fmt.Sprintf(" MEM %s ", humanBytes(s.MemTotal))
-		if s.MemUsed > 0 {
-			memText = fmt.Sprintf(" MEM %s/%s ", humanBytes(s.MemUsed), humanBytes(s.MemTotal))
+		if s.MemUsed > 0 && s.MemTotal > 0 {
+			// Same shape as the CPU segment: value + gauge, so the two chips
+			// read as one system.
+			pct := float64(s.MemUsed) / float64(s.MemTotal) * 100
+			memText = fmt.Sprintf(" MEM %s/%s %s ", humanBytes(s.MemUsed), humanBytes(s.MemTotal), gauge(pct, 8))
 		}
 		left = append(left, statusSegment{text: memText, style: style})
 	}
 
-	var right []statusSegment
+	// One quiet segment on the right instead of two competing chips.
+	var parts []string
 	if s.LoadOK {
-		right = append(right, statusSegment{
-			text:  fmt.Sprintf(" load %.2f %.2f %.2f ", s.Load[0], s.Load[1], s.Load[2]),
-			style: airlineInfo,
-		})
+		parts = append(parts, fmt.Sprintf("load %.2f %.2f %.2f", s.Load[0], s.Load[1], s.Load[2]))
 	}
 	if s.NumCPU > 0 {
-		right = append(right, statusSegment{text: fmt.Sprintf(" %d cpu ", s.NumCPU), style: airlineMuted})
+		parts = append(parts, fmt.Sprintf("%d cpu", s.NumCPU))
+	}
+	var right []statusSegment
+	if len(parts) > 0 {
+		right = append(right, statusSegment{text: " " + strings.Join(parts, " · ") + " ", style: airlineMuted})
 	}
 	return renderAirline(w, left, right)
 }
@@ -2521,10 +2587,17 @@ func (m model) jobsFooter(w int) string {
 	if m.status != "" {
 		left = append(left, statusSegment{text: " " + shorten(m.status, 60) + " ", style: airlineInfo})
 	}
-	right := []statusSegment{
-		{text: fmt.Sprintf(" sessions %d  run %d  queue %d  done %d  fail %d ", sessions, running, queued, finished, failed), style: airlineMuted},
-		{text: " ⏎:open o:log S:sessions e/n:edit s:sort ::cmd x d q ", style: airlineFocus},
+	// Right side stays calm: one compact stats segment (fail only when it
+	// exists, as its own red chip) and a single pointer to the help overlay
+	// instead of a cheat-sheet crammed into the bar.
+	var right []statusSegment
+	if failed > 0 {
+		right = append(right, statusSegment{text: fmt.Sprintf(" fail %d ", failed), style: airlineError})
 	}
+	right = append(right,
+		statusSegment{text: fmt.Sprintf(" run %d · queue %d · done %d · sess %d ", running, queued, finished, sessions), style: airlineMuted},
+		statusSegment{text: " ? help ", style: airlineFocus},
+	)
 	return renderAirline(w, left, right)
 }
 

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/creack/pty"
@@ -103,13 +104,21 @@ func (e *Executor) Run(req ExecRequest) {
 		}
 
 		var err error
-		outFile, err = os.Create(outputFile)
+		if job.Info.Attempt > 0 {
+			// Retry attempts append, so the file holds the whole history.
+			outFile, err = os.OpenFile(outputFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+		} else {
+			outFile, err = os.Create(outputFile)
+		}
 		if err != nil {
 			req.OnFinish(job.ID, protocol.Result{ExitCode: -1})
 			return
 		}
+		if job.Info.Attempt > 0 {
+			fmt.Fprintf(outFile, "\n── retry %d/%d ──\n", job.Info.Attempt, job.Info.Retries)
+		}
 
-		if job.Info.Message != "" {
+		if job.Info.Message != "" && job.Info.Attempt == 0 {
 			fmt.Fprintf(outFile, "# %s\n\n", job.Info.Message)
 		}
 
@@ -164,7 +173,23 @@ func (e *Executor) Run(req ExecRequest) {
 	}
 	e.processes.Store(job.ID, cmd.Process)
 
+	// Enforce the wall-clock timeout: TERM the process group when it fires,
+	// escalating to KILL shortly after for processes that trap TERM.
+	var timedOut atomic.Bool
+	var killTimer *time.Timer
+	if job.Info.TimeoutMS > 0 {
+		pid := cmd.Process.Pid
+		killTimer = time.AfterFunc(time.Duration(job.Info.TimeoutMS)*time.Millisecond, func() {
+			timedOut.Store(true)
+			_ = killProcessGroup(pid)
+			time.AfterFunc(2*time.Second, func() { _ = forceKillProcessGroup(pid) })
+		})
+	}
+
 	err := cmd.Wait()
+	if killTimer != nil {
+		killTimer.Stop()
+	}
 
 	e.processes.Delete(job.ID)
 	if ptmx != nil {
@@ -202,6 +227,7 @@ func (e *Executor) Run(req ExecRequest) {
 			result.ExitCode = -1
 		}
 	}
+	result.TimedOut = timedOut.Load()
 
 	req.OnFinish(job.ID, result)
 	e.runOnFinishHook(job, result)

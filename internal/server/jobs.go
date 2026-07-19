@@ -84,6 +84,8 @@ func (q *JobQueue) RerunRequest(id int) (protocol.NewJobRequest, bool) {
 		Message:        j.Info.Message,
 		NumSlots:       j.Info.NumSlots,
 		Logfile:        j.Logfile,
+		TimeoutMS:      j.Info.TimeoutMS,
+		Retries:        j.Info.Retries,
 	}, true
 }
 
@@ -126,6 +128,8 @@ func (q *JobQueue) AddWithOutputPath(req protocol.NewJobRequest, pathFor func(jo
 			Message:     req.Message,
 			NumSlots:    numSlots,
 			EnqueueTime: time.Now(),
+			TimeoutMS:   req.TimeoutMS,
+			Retries:     req.Retries,
 		},
 		CommandArgs:      req.CommandArgs,
 		ShouldKeepFinish: true,
@@ -440,6 +444,10 @@ func (q *JobQueue) NextRunnable(maxSlots int, busySlots int) (*Job, bool) {
 		if j.Info.State != protocol.StateQueued {
 			continue
 		}
+		if !q.dependenciesMet(j) {
+			// Waiting on other jobs, not on slots — younger jobs may pass it.
+			continue
+		}
 		need := j.Info.NumSlots
 		if need > maxSlots {
 			// A job asking for more slots than exist would otherwise wait
@@ -447,10 +455,10 @@ func (q *JobQueue) NextRunnable(maxSlots int, busySlots int) (*Job, bool) {
 			need = maxSlots
 		}
 		if need > freeSlots {
-			continue
-		}
-		if !q.dependenciesMet(j) {
-			continue
+			// Blocked purely on slots: stop here instead of letting younger
+			// jobs overtake, or a multi-slot job could be starved forever by
+			// a stream of small ones. Slots free up; it runs next.
+			return nil, false
 		}
 		return j, true
 	}
@@ -769,4 +777,38 @@ func (q *JobQueue) Reset() {
 	q.mu.Unlock()
 
 	removeOutputFiles(dropped)
+}
+
+// RequeueForRetry puts a failed job back in the queue when it has retries
+// left, consuming one. Its waiters stay attached — they resolve when the
+// final attempt finishes.
+func (q *JobQueue) RequeueForRetry(id int) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	j, ok := q.byID[id]
+	if !ok || j.Info.Attempt >= j.Info.Retries {
+		return false
+	}
+	j.Info.Attempt++
+	j.Info.State = protocol.StateQueued
+	j.Info.PID = 0
+	q.dirty = true
+	return true
+}
+
+// SetTimeout changes a job's wall-clock timeout (0 clears it). It applies
+// when the job (re)starts; a currently running attempt keeps the timeout it
+// started with.
+func (q *JobQueue) SetTimeout(id int, timeoutMS int64) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	j, ok := q.byID[id]
+	if !ok {
+		return false
+	}
+	j.Info.TimeoutMS = timeoutMS
+	q.dirty = true
+	return true
 }

@@ -6,20 +6,24 @@ A cross-platform task spooler written in Go. Inspired by [task-spooler](https://
 
 ## Features
 
-- **Job queue** — submit commands, they run in order
-- **Concurrency control** — configurable number of parallel slots
+- **Job queue** — submit commands, they run in order (strict order even under slot contention)
+- **Concurrency control** — configurable number of parallel slots; jobs can require several (`-N`)
 - **Job dependencies** — run a job only after another finishes (or succeeds)
-- **Output capture** — stdout/stderr saved to files, viewable with `-c` (follows running jobs like `tail -f`) or tailed live with `-t`
+- **Timeouts & retries** — `--timeout 30m` kills a hung job, `--retries 2` re-runs a failing one; both visible and editable in the TUI
+- **Output capture** — stdout/stderr saved to files, viewable with `-c` (follows running jobs like `tail -f`) or tailed live with `-t`; orphaned files are cleaned automatically (and `ru gc` sweeps leftovers)
 - **PTY execution** — commands run attached to a pseudo-terminal so output stays line-buffered (no buffering surprises for long-running jobs)
-- **Labels & messages** — tag jobs with `-L`, attach a free-form note with `-m` (shown by `-c` and `-i`)
-- **Sessions** — group jobs into named sessions for organization
+- **Names, labels & messages** — name jobs (`-L`, or `e` in the TUI; shown in the NAME column), attach a free-form note with `-m` (shown by `-c` and `-i`)
+- **Sessions** — group jobs into named sessions, organized into groups
+- **Persistent queue** — the job list survives daemon restarts by default (`~/.local/state/qrush/queue.json`)
+- **Layered configuration** — defaults < config file < environment < runtime overrides, with a git-style `ru config` CLI showing each setting's source
 - **Interactive TUI** — bare `ru` opens a full-screen **management home**: a collapsible group → session → job list with live status, an output pager, and a hardware status bar (CPU/memory/load)
 - **Open sessions on demand** — open a session from the session picker (`S`, or `Enter` on an empty session's row) to drop into its tmux-style shell panes; `Ctrl+B d` detaches back to the management screen (shells persist in the daemon)
 - **tmux-style panes** — split a session's terminal into tiled shells (`Ctrl+B |`/`-` or `:vs`/`:hs`), nest them, and navigate with the `Ctrl+B` prefix
 - **Vim key bindings** — `j`/`k` to move, `h`/`l` to collapse/expand, `Ctrl+W` + `hjkl` to move focus between panes; `e` to edit the job/session under the cursor, `n` to create sessions; job actions (kill/remove/rerun/urgent) inline
 - **Mouse support** — click to select/open rows on the management screen (disabled inside panes so terminal text-selection still works)
-- **Cross-platform** — Linux, macOS, Windows (single binary)
-- **Auto-start** — server daemon starts on first use, no setup needed
+- **Single attached TUI** — a second `ru` takes over cleanly (tmux `attach -d` style) instead of two instances fighting over the same panes
+- **Cross-platform** — Linux, macOS, Windows (single binary; Windows connections are token-authenticated)
+- **Auto-start & safe upgrades** — the daemon starts on first use; after a rebuild, `ru upgrade` (run by `make build`) retires a stale daemon only when it's idle
 - **JSON output** — machine-readable job listing
 
 ## Installation
@@ -49,6 +53,8 @@ ru sleep 10
 
 # List all jobs (to stdout)
 ru -l
+# Running: 1/1
+# ID   STATE        TIME    COMMAND
 # 0    finished     0s      echo hello world
 # 1    running      3s      sleep 10
 
@@ -69,8 +75,9 @@ ru -w 1
 ## Usage
 
 ```
-ru [action] [-nEzf] [-m <msg>] [-L <label>] [-D <id,...>] [-W <id,...>]
-                  [-N <num>] [-O <file>] [-P <num>] [-g <session>] [cmd...]
+ru [action] [-nEf] [-m <msg>] [-L <label>] [-D <id,...>] [-W <id,...>]
+            [-N <num>] [-O <file>] [-g <session>] [--timeout <dur>]
+            [--retries <n>] [cmd...]
 ```
 
 ### Actions
@@ -104,6 +111,9 @@ ru [action] [-nEzf] [-m <msg>] [-L <label>] [-D <id,...>] [-W <id,...>]
 | `-j`, `--jobs`, `tui -j` | Open the TUI directly in jobs-only mode (`q` quits) |
 | `term ls` | List live interactive panes (`session  pane`) hosted by the daemon |
 | `term kill <session> <pane>` | Kill a persistent interactive pane |
+| `config …` | Show/edit settings with provenance (see [Configuration](#configuration)) |
+| `gc` | Delete orphaned job-output files from the log directory |
+| `upgrade` | Stop a stale daemon from an older binary — only if it's idle |
 
 ### Job Submission Modifiers
 
@@ -121,6 +131,8 @@ ru [action] [-nEzf] [-m <msg>] [-L <label>] [-D <id,...>] [-W <id,...>]
 | `-W <id,...>` | Depend on specific job(s) succeeding |
 | `-g <session>` | Assign job to a session (default: `"default"`) |
 | `--session <s>` | Same as `-g` |
+| `--timeout <dur>` | Kill the job after this wall-clock time (e.g. `30m`, `90s`); default: none. Shown in the TUI's TIMEOUT column and editable per job in the `e` box |
+| `--retries <n>` | Re-run the job up to `n` extra times when it fails (non-zero exit, signal, or timeout). Attempts append to one output file; `ru -w` resolves on the final attempt |
 
 ### Sessions
 
@@ -156,18 +168,22 @@ along the bottom shows system-wide CPU, memory, load average, and core count
 (updated every second).
 
 ```
-╭───────────────────────────────────────────────────────────────────╮
-│   ID GROUP ▲   SESSION    STATE      TIME    COMMAND               │
-│    0 default   build      finished   0s      make all             │
-│    1 default   build      running    4s      make test            │
-│ ·    default   default    no jobs            — empty session · ⏎   │
-│ ·    work      deploy     no jobs            — empty session · ⏎   │
-│ ── job details ───────────────────────────────────────────────── │
-│ Command: make all   State: finished   Real time: 0s               │
-╰───────────────────────────────────────────────────────────────────╯
- MANAGE  sort:group▲  sessions 3  run 1  queue 0  done 1  fail 0  …
- HW   CPU 4%  MEM 2.6G/15.0G           load 1.11 1.35 1.13   12 cpu
+╭──────────────────────────────────────────────────────────────────────────────╮
+│   ID   GROUP ▲  SESSION  STATE     TIME  TIMEOUT  NAME       COMMAND         │
+│    0   default  build    finished  40s   -        compile    make all        │
+│    1   default  build    running   4s    30m      tests      make test       │
+│    2   default  build    retry 1/2       -        make test  make test       │
+│  ·     work     deploy   no jobs                             — empty session │
+│ ── job details ────────────────────────────────────────────────────────────  │
+│ Command: make all   State: finished   Real time: 40s                         │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ MANAGE  sort:group▲               run 1 · queue 1 · done 1 · sess 3   ? help
+ HW  CPU 4% ▂░░░░░░░  MEM 2.6G/15.0G ▂░░░░░░░    load 1.11 1.35 1.13 · 12 cpu
 ```
+
+The **TIMEOUT** column shows each job's wall-clock limit (`-` = none) and the
+**NAME** column its name — falling back to a dim copy of the command when the
+job is unnamed.
 
 Every session is listed: a session's jobs appear as rows, and a session with no
 jobs still gets one placeholder row (so nothing is hidden). Press **Enter** on a
@@ -200,7 +216,7 @@ for a key/command cheatsheet.
 | `Enter` | Open the cursor job's **output** (the pager); on an empty-session row, open that session's shell panes |
 | `o` | Open the output pager (scrollable; follows running jobs); press `i` there to overlay job info |
 | `S` | Open the **session picker** — lists every session, incl. empty ones |
-| `e` | Edit the cursor row in one box — a job row: job name + its session's name/group; a session row: name + group |
+| `e` | Edit the cursor row in one box — a job row: job name, its session's name/group, and its timeout (empty = none); a session row: name + group |
 | `n` / `a` | Create a new session (opens the edit box; you land in it) |
 | `sg` / `si` / `ss` / `st` | Sort by group / id / state / time; the same chord again (or `R`) reverses |
 | `/` | Filter by command/label/session (`Enter` apply, `Esc` cancel) |
@@ -333,6 +349,12 @@ ru -g test make test
 # Open interactive TUI
 ru -S
 
+# Kill a job that runs longer than 30 minutes
+ru --timeout 30m make test
+
+# Re-run a flaky job up to 2 extra times if it fails
+ru --retries 2 ./flaky-test.sh
+
 # Server-side environment variables
 ru --setenv MY_VAR=value
 ru --getenv MY_VAR
@@ -340,6 +362,9 @@ ru --getenv MY_VAR
 # Change log directory
 ru --set_logdir /tmp/my-logs
 ru --get_logdir
+
+# Clean up orphaned output files
+ru gc
 ```
 
 ## Configuration
@@ -381,7 +406,8 @@ accepted as fallbacks for compatibility.
 
 ## Output Files
 
-Each job's output is stored in `$TMPDIR/ru_<jobID>_<random>.out` (8 random hex chars). The random suffix prevents old log files from being overwritten when job IDs repeat across daemon restarts. Use `ru -o <id>` to print the exact path, `ru -c <id>` to view (or follow) the content.
+Each job's output is stored in the log directory (default `$TMPDIR`; see the
+`logdir` setting) as `ru_<jobID>_<random>.out` (8 random hex chars). The random suffix prevents old log files from being overwritten when job IDs repeat across daemon restarts. Use `ru -o <id>` to print the exact path, `ru -c <id>` to view (or follow) the content.
 
 When a job leaves the queue (`ru -x`, `ru -C`, `QRUSH_MAXFINISHED` pruning, or
 deleting its session), its auto-generated output file is deleted with it, so
@@ -403,6 +429,9 @@ versions or unpersisted queues) — user-named files are never candidates.
 - After upgrading `ru`, a daemon from an older binary is **never killed
   automatically**: commands refuse with a version message until you run
   `ru -K` yourself, so running jobs and live panes die only when you decide.
+  `ru upgrade` (run by `make build`) automates the safe case: it stops a stale
+  daemon only when it has **no running jobs and no live panes**, and otherwise
+  leaves it with a note.
 
 ## Building
 
@@ -419,8 +448,8 @@ GOOS=windows GOARCH=amd64 go build -o ru.exe ./cmd/ru/
 ## ToDo
 
 - HW monitoring popup box
+- CI (vet + race tests across Linux/macOS/Windows)
 
 ## License
 
 MIT
-# qrush

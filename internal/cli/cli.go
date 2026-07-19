@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/han/qrush/internal/protocol"
 )
@@ -62,6 +63,7 @@ const (
 	ActionConfigEdit
 	ActionConfigPath
 	ActionGC
+	ActionUpgrade
 )
 
 type Command struct {
@@ -81,6 +83,9 @@ type Command struct {
 	Session    string
 	SessionArg string
 	Message    string
+
+	TimeoutMS int64
+	Retries   int
 
 	StoreOutput    bool
 	SeparateStderr bool
@@ -129,6 +134,10 @@ func Parse(args []string) (*Command, error) {
 	}
 	if args[0] == "gc" {
 		cmd.Action = ActionGC
+		return cmd, nil
+	}
+	if args[0] == "upgrade" {
+		cmd.Action = ActionUpgrade
 		return cmd, nil
 	}
 
@@ -430,6 +439,26 @@ func parseLongFlag(cmd *Command, args []string, i *int, actionSet *bool) error {
 			return fmt.Errorf("--set_logdir requires a path")
 		}
 		cmd.LogdirPath = args[*i]
+	case arg == "--timeout":
+		*i++
+		if *i >= len(args) {
+			return fmt.Errorf("--timeout requires a duration (e.g. 30m, 90s)")
+		}
+		d, err := time.ParseDuration(args[*i])
+		if err != nil || d <= 0 {
+			return fmt.Errorf("invalid timeout %q (e.g. 30m, 90s)", args[*i])
+		}
+		cmd.TimeoutMS = d.Milliseconds()
+	case arg == "--retries":
+		*i++
+		if *i >= len(args) {
+			return fmt.Errorf("--retries requires a count")
+		}
+		n, err := strconv.Atoi(args[*i])
+		if err != nil || n < 0 {
+			return fmt.Errorf("invalid retry count %q", args[*i])
+		}
+		cmd.Retries = n
 	case arg == "--session":
 		*i++
 		if *i >= len(args) {

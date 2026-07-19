@@ -50,21 +50,21 @@ var (
 )
 
 var (
-	groupStyle          = lipgloss.NewStyle().Bold(true).Foreground(cFg)
-	sessionStyle        = lipgloss.NewStyle().Foreground(cFgBright)
-	treeIconStyle       = lipgloss.NewStyle().Foreground(cAccent)
-	folderStyle         = lipgloss.NewStyle().Foreground(cAmber)
-	modalTitleStyle     = lipgloss.NewStyle().Bold(true).Foreground(cAccent)
-	modalActiveStyle    = lipgloss.NewStyle().Bold(true).Foreground(cFgBright)
-	treeSummaryStyle    = lipgloss.NewStyle().Foreground(cFgFaint)
-	treeEmptyStyle      = lipgloss.NewStyle().Italic(true).Foreground(cFgDim)
-	treePaneStyle       = lipgloss.NewStyle().Background(cPanelBg)
-	cursorStyle         = lipgloss.NewStyle().Foreground(cInk).Background(cCursorBg)
+	groupStyle       = lipgloss.NewStyle().Bold(true).Foreground(cFg)
+	sessionStyle     = lipgloss.NewStyle().Foreground(cFgBright)
+	treeIconStyle    = lipgloss.NewStyle().Foreground(cAccent)
+	folderStyle      = lipgloss.NewStyle().Foreground(cAmber)
+	modalTitleStyle  = lipgloss.NewStyle().Bold(true).Foreground(cAccent)
+	modalActiveStyle = lipgloss.NewStyle().Bold(true).Foreground(cFgBright)
+	treeSummaryStyle = lipgloss.NewStyle().Foreground(cFgFaint)
+	treeEmptyStyle   = lipgloss.NewStyle().Italic(true).Foreground(cFgDim)
+	treePaneStyle    = lipgloss.NewStyle().Background(cPanelBg)
+	cursorStyle      = lipgloss.NewStyle().Foreground(cInk).Background(cCursorBg)
 	// inputCursorStyle is the text-input caret: a maximum-contrast solid block
 	// (white in dark mode, near-black in light). NOTE: bubbles' cursor.View
 	// applies Reverse(true) on top of this style, swapping fg/bg at render
 	// time — so the *foreground* here is the block color the user sees.
-	inputCursorStyle = lipgloss.NewStyle().Foreground(cFgBright).Background(cInk)
+	inputCursorStyle    = lipgloss.NewStyle().Foreground(cFgBright).Background(cInk)
 	cursorInactiveStyle = lipgloss.NewStyle().Foreground(cInactFg).Background(cInactBg)
 	selectedStyle       = lipgloss.NewStyle().Foreground(cInk).Background(cSelectBg)
 	cursorSelectedStyle = lipgloss.NewStyle().Foreground(cInk).Background(cSelectBg)

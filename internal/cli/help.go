@@ -61,6 +61,8 @@ Modifiers (for job submission):
   -W <id,...>         Depend on specific job(s) succeeding
   -g <session>        Assign job to a session (default: "default")
   --session <session> Same as -g
+  --timeout <dur>     Kill the job after this wall-clock time (e.g. 30m, 90s)
+  --retries <n>       Re-run the job up to n extra times if it fails
 
 Serialization:
   -M <format>         Output format: default, json, tab
@@ -84,6 +86,7 @@ Log directory:
 
 Other:
   gc                  Delete orphaned job-output files from the log directory
+  upgrade             Stop a stale daemon from an older binary (only if idle)
   -V                  Show version
   -h                  Show this help
 

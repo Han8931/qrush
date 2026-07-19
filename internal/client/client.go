@@ -68,6 +68,35 @@ func EnsureServer() error {
 	return startServer(dialer)
 }
 
+// ProbeServerVersion reports the protocol version of a running daemon, if
+// any. Unlike EnsureServer it never starts a daemon and works across protocol
+// versions (the version exchange predates every bump).
+func ProbeServerVersion() (int, bool) {
+	conn, err := ipc.NewDialer(ipc.SocketPath()).Dial()
+	if err != nil {
+		return 0, false
+	}
+	defer conn.Close()
+	v, err := serverVersion(conn)
+	if err != nil {
+		return 0, false
+	}
+	return v, true
+}
+
+// WaitServerStop waits (bounded) until nothing accepts on the socket.
+func WaitServerStop() {
+	dialer := ipc.NewDialer(ipc.SocketPath())
+	for i := 0; i < 20; i++ {
+		conn, err := dialer.Dial()
+		if err != nil {
+			return
+		}
+		conn.Close()
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 // errDaemonRefused marks a well-formed MsgError refusal from a live qrush
 // daemon (as opposed to garbage from an unrelated listener).
 type errDaemonRefused struct{ msg string }

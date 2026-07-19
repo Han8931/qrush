@@ -86,8 +86,14 @@ func jobStateText(j protocol.JobInfo) (string, lipgloss.Style) {
 	case protocol.StateRunning:
 		return "running", runningStyle
 	case protocol.StateQueued:
+		if j.Attempt > 0 {
+			return fmt.Sprintf("retry %d/%d", j.Attempt, j.Retries), queuedStyle
+		}
 		return "queued", queuedStyle
 	case protocol.StateFinished:
+		if j.Result.TimedOut {
+			return "timeout", finishedErrStyle
+		}
 		if j.Result.DiedBySignal {
 			return fmt.Sprintf("signal %d", j.Result.Signal), finishedErrStyle
 		}

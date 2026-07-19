@@ -80,11 +80,24 @@ func (s *Scheduler) trySchedule() {
 }
 
 func (s *Scheduler) onJobFinish(jobID int, result protocol.Result) {
+	// A failed attempt with retries left goes back to the queue instead of
+	// finishing; only the final attempt resolves the job (and its waiters).
+	if jobFailed(result) && s.jobs.RequeueForRetry(jobID) {
+		if s.onStateChangeHook != nil {
+			s.onStateChangeHook()
+		}
+		s.Poke()
+		return
+	}
 	s.jobs.MarkFinished(jobID, result)
 	if s.onStateChangeHook != nil {
 		s.onStateChangeHook()
 	}
 	s.Poke()
+}
+
+func jobFailed(r protocol.Result) bool {
+	return r.ExitCode != 0 || r.DiedBySignal || r.TimedOut
 }
 
 func (s *Scheduler) SetOnStateChangeHook(fn func()) {

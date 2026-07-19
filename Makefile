@@ -5,6 +5,7 @@ MODULE = github.com/han/qrush
 
 build:
 	go build -o $(BINARY) ./cmd/ru/
+	@./$(BINARY) upgrade
 
 clean:
 	rm -f $(BINARY)

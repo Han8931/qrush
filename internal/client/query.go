@@ -522,6 +522,24 @@ func SetJobLabel(id int, label string) error {
 	return recvOK(c)
 }
 
+// SetJobTimeout changes a job's wall-clock timeout (0 clears it); it takes
+// effect when the job (re)starts.
+func SetJobTimeout(id int, timeoutMS int64) error {
+	c, err := Connect()
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+
+	if err := c.Send(&protocol.Msg{
+		Type:    protocol.MsgSetJobTimeout,
+		Payload: protocol.PayloadSetTimeout{JobID: id, TimeoutMS: timeoutMS},
+	}); err != nil {
+		return err
+	}
+	return recvOK(c)
+}
+
 func LastID() (int, error) {
 	c, err := Connect()
 	if err != nil {

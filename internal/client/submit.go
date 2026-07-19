@@ -37,6 +37,8 @@ func SubmitJob(command []string, opts SubmitOpts) (int, error) {
 		Message:        opts.Message,
 		NumSlots:       opts.NumSlots,
 		Logfile:        opts.Logfile,
+		TimeoutMS:      opts.TimeoutMS,
+		Retries:        opts.Retries,
 	}
 
 	err = c.Send(&protocol.Msg{
@@ -83,4 +85,6 @@ type SubmitOpts struct {
 	Message        string
 	NumSlots       int
 	Logfile        string
+	TimeoutMS      int64
+	Retries        int
 }

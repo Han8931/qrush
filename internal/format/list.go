@@ -70,12 +70,18 @@ func formatDefault(jobs []protocol.JobInfo, maxSlots int) string {
 func formatState(j protocol.JobInfo) string {
 	switch j.State {
 	case protocol.StateQueued:
+		if j.Attempt > 0 {
+			return fmt.Sprintf("retry %d/%d", j.Attempt, j.Retries)
+		}
 		return "queued"
 	case protocol.StateAllocating:
 		return "allocating"
 	case protocol.StateRunning:
 		return "running"
 	case protocol.StateFinished:
+		if j.Result.TimedOut {
+			return "timeout"
+		}
 		if j.Result.DiedBySignal {
 			return fmt.Sprintf("signal %d", j.Result.Signal)
 		}
