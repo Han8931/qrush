@@ -46,6 +46,10 @@ type JobQueue struct {
 	lastID   int
 	sessions map[string]string
 	groups   map[string]bool
+	// dirty is set by every mutation and cleared by save(), so snapshots are
+	// only written when the queue actually changed (the server calls save
+	// after every message, including read-only polls).
+	dirty bool
 }
 
 func NewJobQueue() *JobQueue {
@@ -136,6 +140,7 @@ func (q *JobQueue) AddWithOutputPath(req protocol.NewJobRequest, pathFor func(jo
 		j.Info.OutputFilename = pathFor(j.ID, req.Logfile)
 	}
 
+	q.dirty = true
 	q.jobs = append(q.jobs, j)
 	q.byID[j.ID] = j
 	q.lastID = q.nextID
@@ -152,6 +157,7 @@ func (q *JobQueue) Remove(id int) bool {
 		return false
 	}
 
+	q.dirty = true
 	delete(q.byID, id)
 	for i, job := range q.jobs {
 		if job.ID == id {
@@ -213,6 +219,7 @@ func (q *JobQueue) SetRunning(id int, pid int, outputFile string) {
 			j.Info.OutputFilename = outputFile
 		}
 		j.Info.StartTime = time.Now()
+		q.dirty = true
 	}
 }
 
@@ -225,6 +232,7 @@ func (q *JobQueue) SetLabel(id int, label string) bool {
 		return false
 	}
 	j.Info.Label = label
+	q.dirty = true
 	return true
 }
 
@@ -234,6 +242,7 @@ func (q *JobQueue) SetOutputFilename(id int, outputFile string) {
 
 	if j, ok := q.byID[id]; ok {
 		j.Info.OutputFilename = outputFile
+		q.dirty = true
 	}
 }
 
@@ -248,6 +257,7 @@ func (q *JobQueue) MarkFinished(id int, result protocol.Result) {
 	j.Info.State = protocol.StateFinished
 	j.Info.Result = result
 	j.Info.EndTime = time.Now()
+	q.dirty = true
 	waitChs := j.waitChs
 	j.waitChs = nil
 	q.mu.Unlock()
@@ -269,6 +279,7 @@ func (q *JobQueue) MarkSkipped(id int) {
 	j.Info.State = protocol.StateSkipped
 	j.Info.Result = protocol.Result{Skipped: true}
 	j.Info.EndTime = time.Now()
+	q.dirty = true
 	waitChs := j.waitChs
 	j.waitChs = nil
 	q.mu.Unlock()
@@ -292,6 +303,9 @@ func (q *JobQueue) ClearFinished() int {
 		}
 	}
 	q.jobs = remaining
+	if len(dropped) > 0 {
+		q.dirty = true
+	}
 	q.mu.Unlock()
 
 	removeOutputFiles(dropped)
@@ -328,6 +342,7 @@ func (q *JobQueue) PruneFinished(maxKeep int) {
 		}
 	}
 	q.jobs = remaining
+	q.dirty = true
 	q.mu.Unlock()
 
 	removeOutputFiles(dropped)
@@ -364,6 +379,7 @@ func (q *JobQueue) MakeUrgent(id int) bool {
 		return true
 	}
 
+	q.dirty = true
 	q.jobs = append(q.jobs[:idx], q.jobs[idx+1:]...)
 	rear := make([]*Job, len(q.jobs[firstQueued:]))
 	copy(rear, q.jobs[firstQueued:])
@@ -389,6 +405,7 @@ func (q *JobQueue) Swap(id1, id2 int) bool {
 		return false
 	}
 	q.jobs[idx1], q.jobs[idx2] = q.jobs[idx2], q.jobs[idx1]
+	q.dirty = true
 	return true
 }
 
@@ -581,6 +598,9 @@ func (q *JobQueue) ClearFinishedInSession(session string) int {
 		}
 	}
 	q.jobs = remaining
+	if len(dropped) > 0 {
+		q.dirty = true
+	}
 	q.mu.Unlock()
 
 	removeOutputFiles(dropped)
@@ -595,6 +615,7 @@ func (q *JobQueue) CreateSession(name string) bool {
 		return false
 	}
 	q.sessions[name] = "default"
+	q.dirty = true
 	return true
 }
 
@@ -625,6 +646,7 @@ func (q *JobQueue) RenameSession(oldName, newName string) bool {
 			j.Info.Session = newName
 		}
 	}
+	q.dirty = true
 	return true
 }
 
@@ -660,6 +682,7 @@ func (q *JobQueue) DeleteSession(name string) (bool, string) {
 	}
 	q.jobs = remaining
 	delete(q.sessions, name)
+	q.dirty = true
 	q.mu.Unlock()
 
 	removeOutputFiles(dropped)
@@ -674,6 +697,7 @@ func (q *JobQueue) CreateGroup(name string) bool {
 		return false
 	}
 	q.groups[name] = true
+	q.dirty = true
 	return true
 }
 
@@ -691,6 +715,7 @@ func (q *JobQueue) RenameGroup(oldName, newName string) bool {
 			q.sessions[session] = newName
 		}
 	}
+	q.dirty = true
 	return true
 }
 
@@ -710,6 +735,7 @@ func (q *JobQueue) DeleteGroup(name string) (bool, string) {
 		}
 	}
 	delete(q.groups, name)
+	q.dirty = true
 	return true, ""
 }
 
@@ -724,5 +750,23 @@ func (q *JobQueue) MoveSession(session, group string) bool {
 		return false
 	}
 	q.sessions[session] = group
+	q.dirty = true
 	return true
+}
+
+// Reset drops every job, all sessions and groups except the defaults, and the
+// ID counters — the queue side of `:reset`. Generated output files of dropped
+// jobs are deleted.
+func (q *JobQueue) Reset() {
+	q.mu.Lock()
+	dropped := q.jobs
+	q.jobs = nil
+	q.byID = make(map[int]*Job)
+	q.sessions = map[string]string{"default": "default"}
+	q.groups = map[string]bool{"default": true}
+	q.nextID, q.lastID = 0, 0
+	q.dirty = true
+	q.mu.Unlock()
+
+	removeOutputFiles(dropped)
 }

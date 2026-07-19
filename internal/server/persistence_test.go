@@ -8,6 +8,36 @@ import (
 	"github.com/han/qrush/internal/protocol"
 )
 
+// save writes a snapshot only when the queue changed since the last save.
+func TestSaveSkipsWhenClean(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "q.json")
+	q := NewJobQueue()
+
+	if err := q.save(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("a never-modified queue should not write a snapshot")
+	}
+
+	q.Add(protocol.NewJobRequest{Command: "a"})
+	if err := q.save(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("dirty queue should write a snapshot: %v", err)
+	}
+
+	// No mutations since the last save: saving again must be a no-op.
+	os.Remove(path)
+	if err := q.save(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("save should skip while the queue is clean")
+	}
+}
+
 func TestJobQueueSaveAndLoad(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "queue.json")
 	q := NewJobQueue()

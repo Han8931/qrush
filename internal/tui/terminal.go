@@ -6,7 +6,6 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -65,6 +64,10 @@ func (s *shellState) sendRemoteMsg(msg *protocol.Msg) {
 	s.writeMu.Unlock()
 }
 
+// spawnShellPane attaches to a daemon-hosted pane. There is deliberately no
+// local-PTY fallback: a pane that silently isn't daemon-backed would look
+// identical but die with the TUI, contradicting the persistence the UI
+// promises. If the daemon is unreachable the caller surfaces the error.
 func spawnShellPane(cols, rows int, session, pane string) (*shellState, error) {
 	if session == "" {
 		session = "default"
@@ -73,122 +76,18 @@ func spawnShellPane(cols, rows int, session, pane string) (*shellState, error) {
 		pane = "main"
 	}
 
-	if remote, err := client.AttachTerminal(session, pane, cols, rows); err == nil {
-		s := &shellState{
-			session: session,
-			pane:    pane,
-			remote:  remote,
-			ptyCh:   make(chan ptyEvent, 1),
-		}
-		s.vt = vt10x.New(vt10x.WithSize(cols, rows), vt10x.WithWriter(remoteInputWriter{s: s}))
-		return s, nil
-	}
-
-	shell := os.Getenv("SHELL")
-	if shell == "" {
-		shell = "/bin/sh"
-	}
-	if session == "" {
-		session = "default"
-	}
-
-	cmd, rcDir := shellCommand(shell)
-	env := cmd.Env
-	if env == nil {
-		env = os.Environ()
-	}
-	cmd.Env = append(env, "QRUSH_SESSION="+session)
-
-	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{
-		Rows: uint16(rows),
-		Cols: uint16(cols),
-	})
+	remote, err := client.AttachTerminal(session, pane, cols, rows)
 	if err != nil {
-		if rcDir != "" {
-			os.RemoveAll(rcDir)
-		}
-		return nil, fmt.Errorf("start shell: %w", err)
+		return nil, fmt.Errorf("attach pane %s/%s: %w", session, pane, err)
 	}
-
-	vterm := vt10x.New(vt10x.WithSize(cols, rows), vt10x.WithWriter(ptmx))
-
-	return &shellState{
+	s := &shellState{
 		session: session,
 		pane:    pane,
-		ptmx:    ptmx,
-		cmd:     cmd,
-		vt:      vterm,
+		remote:  remote,
 		ptyCh:   make(chan ptyEvent, 1),
-		rcDir:   rcDir,
-	}, nil
-}
-
-func shellCommand(shell string) (*exec.Cmd, string) {
-	name := filepath.Base(shell)
-	switch name {
-	case "zsh":
-		if rcDir, err := setupZshPromptMarker(); err == nil {
-			cmd := exec.Command(shell)
-			cmd.Env = append(os.Environ(), "ZDOTDIR="+rcDir, "QRUSH_ORIG_ZDOTDIR="+origZDOTDIR())
-			return cmd, rcDir
-		}
-	case "bash":
-		if rcDir, rcFile, err := setupBashPromptMarker(); err == nil {
-			return exec.Command(shell, "--rcfile", rcFile, "-i"), rcDir
-		}
 	}
-	return exec.Command(shell), ""
-}
-
-func setupZshPromptMarker() (string, error) {
-	rcDir, err := os.MkdirTemp("", "qrush-zsh-*")
-	if err != nil {
-		return "", err
-	}
-	rc := `if [ -n "$QRUSH_ORIG_ZDOTDIR" ] && [ -r "$QRUSH_ORIG_ZDOTDIR/.zshrc" ]; then
-  source "$QRUSH_ORIG_ZDOTDIR/.zshrc"
-elif [ -r "$HOME/.zshrc" ]; then
-  source "$HOME/.zshrc"
-fi
-function __qrush_prompt_marker() { printf '\033]133;A\a'; }
-autoload -Uz add-zsh-hook
-add-zsh-hook precmd __qrush_prompt_marker
-`
-	if err := os.WriteFile(filepath.Join(rcDir, ".zshrc"), []byte(rc), 0600); err != nil {
-		os.RemoveAll(rcDir)
-		return "", err
-	}
-	return rcDir, nil
-}
-
-func setupBashPromptMarker() (string, string, error) {
-	rcDir, err := os.MkdirTemp("", "qrush-bash-*")
-	if err != nil {
-		return "", "", err
-	}
-	rcFile := filepath.Join(rcDir, "bashrc")
-	rc := `if [ -r "$HOME/.bashrc" ]; then
-  source "$HOME/.bashrc"
-fi
-__qrush_prompt_marker() { printf '\033]133;A\a'; }
-if [ -n "$PROMPT_COMMAND" ]; then
-  PROMPT_COMMAND="__qrush_prompt_marker; $PROMPT_COMMAND"
-else
-  PROMPT_COMMAND="__qrush_prompt_marker"
-fi
-`
-	if err := os.WriteFile(rcFile, []byte(rc), 0600); err != nil {
-		os.RemoveAll(rcDir)
-		return "", "", err
-	}
-	return rcDir, rcFile, nil
-}
-
-func origZDOTDIR() string {
-	if zdotdir := os.Getenv("ZDOTDIR"); zdotdir != "" {
-		return zdotdir
-	}
-	return os.Getenv("HOME")
+	s.vt = vt10x.New(vt10x.WithSize(cols, rows), vt10x.WithWriter(remoteInputWriter{s: s}))
+	return s, nil
 }
 
 func (s *shellState) resize(cols, rows int) {
@@ -648,6 +547,15 @@ func renderTermCells(vt vt10x.Terminal, cols, rows int, showCursor bool) [][]str
 }
 
 func keyToBytes(msg tea.KeyMsg) []byte {
+	b := keyBaseBytes(msg)
+	// Alt-modified keys are conventionally sent as ESC followed by the key.
+	if msg.Alt && len(b) > 0 {
+		return append([]byte{0x1b}, b...)
+	}
+	return b
+}
+
+func keyBaseBytes(msg tea.KeyMsg) []byte {
 	switch msg.Type {
 	case tea.KeyRunes:
 		return []byte(string(msg.Runes))
@@ -679,6 +587,34 @@ func keyToBytes(msg tea.KeyMsg) []byte {
 		return []byte("\x1b[5~")
 	case tea.KeyPgDown:
 		return []byte("\x1b[6~")
+	case tea.KeyShiftTab:
+		return []byte("\x1b[Z")
+	case tea.KeyInsert:
+		return []byte("\x1b[2~")
+	case tea.KeyF1:
+		return []byte("\x1bOP")
+	case tea.KeyF2:
+		return []byte("\x1bOQ")
+	case tea.KeyF3:
+		return []byte("\x1bOR")
+	case tea.KeyF4:
+		return []byte("\x1bOS")
+	case tea.KeyF5:
+		return []byte("\x1b[15~")
+	case tea.KeyF6:
+		return []byte("\x1b[17~")
+	case tea.KeyF7:
+		return []byte("\x1b[18~")
+	case tea.KeyF8:
+		return []byte("\x1b[19~")
+	case tea.KeyF9:
+		return []byte("\x1b[20~")
+	case tea.KeyF10:
+		return []byte("\x1b[21~")
+	case tea.KeyF11:
+		return []byte("\x1b[23~")
+	case tea.KeyF12:
+		return []byte("\x1b[24~")
 	case tea.KeyCtrlA:
 		return []byte{0x01}
 	case tea.KeyCtrlB:

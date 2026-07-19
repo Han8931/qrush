@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -15,6 +17,8 @@ import (
 	"github.com/han/qrush/internal/client"
 	"github.com/han/qrush/internal/config"
 	"github.com/han/qrush/internal/format"
+	"github.com/han/qrush/internal/ipc"
+	"github.com/han/qrush/internal/protocol"
 	"github.com/han/qrush/internal/server"
 	"github.com/han/qrush/internal/tui"
 )
@@ -84,9 +88,18 @@ func main() {
 
 func runServer() {
 	server.IgnoreSIGPIPE()
-	cfg := config.Load()
+	closeLog := setupDaemonLog()
+	defer closeLog()
+
+	cfg, _, warnings := config.LoadDetailed()
+	for _, w := range warnings {
+		log.Printf("config: %s", w)
+	}
+	log.Printf("daemon starting: protocol v%d, socket %s", protocol.ProtocolVersion, ipc.SocketPath())
+
 	srv, err := server.New(cfg)
 	if err != nil {
+		log.Printf("startup failed: %v", err)
 		fmt.Fprintf(os.Stderr, "ru server: %v\n", err)
 		os.Exit(1)
 	}
@@ -103,9 +116,34 @@ func runServer() {
 	}()
 
 	if err := srv.Run(ctx); err != nil {
+		log.Printf("run failed: %v", err)
 		fmt.Fprintf(os.Stderr, "ru server: %v\n", err)
 		os.Exit(1)
 	}
+	log.Printf("daemon stopped")
+}
+
+// setupDaemonLog routes the standard logger to the daemon log file. The
+// daemon runs detached with stdout/stderr discarded, so without this every
+// log line — accept errors, persist failures, config warnings — vanishes.
+// The previous log is rotated once past ~1MB.
+func setupDaemonLog() func() {
+	path := config.DaemonLogPath()
+	if path == "" {
+		return func() {}
+	}
+	if fi, err := os.Stat(path); err == nil && fi.Size() > 1<<20 {
+		_ = os.Rename(path, path+".old")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return func() {}
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return func() {}
+	}
+	log.SetOutput(f)
+	return func() { f.Close() }
 }
 
 func dispatch(cmd *cli.Command) error {
@@ -278,6 +316,8 @@ func dispatch(cmd *cli.Command) error {
 		return client.GroupRename(cmd.Session, cmd.SessionArg)
 	case cli.ActionGroupDelete:
 		return client.GroupDelete(cmd.Session)
+	case cli.ActionGC:
+		return doGC()
 	case cli.ActionTermList:
 		terms, err := client.ListTerminals()
 		if err != nil {
@@ -408,6 +448,33 @@ func doForeground(cmd *cli.Command) error {
 	if result.ExitCode != 0 {
 		os.Exit(result.ExitCode)
 	}
+	return nil
+}
+
+// doGC sweeps the daemon's current log directory for generated output files
+// that no live job references (typically left by jobs removed before file GC
+// existed, or by a queue reset without persistence).
+func doGC() error {
+	logdir, err := client.GetLogdir()
+	if err != nil {
+		return err
+	}
+	res, err := client.ListJobs()
+	if err != nil {
+		return err
+	}
+	referenced := make(map[string]bool, len(res.Jobs)*2)
+	for _, j := range res.Jobs {
+		if j.OutputFilename != "" {
+			referenced[j.OutputFilename] = true
+			referenced[j.OutputFilename+".e"] = true
+		}
+	}
+	n, freed, err := client.SweepOrphans(logdir, referenced)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("removed %d orphaned output file(s), freed %d bytes\n", n, freed)
 	return nil
 }
 

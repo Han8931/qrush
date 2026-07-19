@@ -27,6 +27,11 @@ func (q *JobQueue) save(path string) error {
 	}
 
 	q.mu.Lock()
+	if !q.dirty {
+		q.mu.Unlock()
+		return nil
+	}
+	q.dirty = false
 	snapshot := queueSnapshot{
 		Version:  queueSnapshotVersion,
 		NextID:   q.nextID,
@@ -38,9 +43,25 @@ func (q *JobQueue) save(path string) error {
 	data, err := json.MarshalIndent(snapshot, "", "  ")
 	q.mu.Unlock()
 	if err != nil {
+		q.markDirty()
 		return fmt.Errorf("encode queue snapshot: %w", err)
 	}
 
+	if err := writeSnapshot(path, data); err != nil {
+		// The change is still unpersisted; re-mark so the next save retries.
+		q.markDirty()
+		return err
+	}
+	return nil
+}
+
+func (q *JobQueue) markDirty() {
+	q.mu.Lock()
+	q.dirty = true
+	q.mu.Unlock()
+}
+
+func writeSnapshot(path string, data []byte) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create snapshot directory: %w", err)
@@ -117,6 +138,8 @@ func loadJobQueue(path string) (*JobQueue, error) {
 			job.Info.PID = 0
 			job.Info.EndTime = now
 			job.Info.Result = protocol.Result{ExitCode: -1}
+			// The fix-up must reach the next snapshot.
+			q.dirty = true
 		}
 	}
 	return q, nil

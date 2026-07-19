@@ -223,6 +223,9 @@ Press `:` to open a command line on the management screen:
 | `:set logdir <path>` | Set the daemon's log directory |
 | `:sort <group\|id\|state\|time>` | Set the sort field |
 | `:config` | Open the settings edit box (slots, log directory) |
+| `:kill <id…>` / `:kill -a` | Kill the given jobs (no id: current selection) / all running jobs |
+| `:restart <id…>` / `:restart -a` | Restart job(s): kill if running, then re-enqueue (no id: selection; `-a`: every non-queued job) |
+| `:reset` | Factory-reset qrush — kills all jobs & panes, deletes sessions/groups, restores default settings (asks `y`/`n`) |
 | `:clear` | Clear finished jobs |
 | `:help` | Show the help overlay |
 | `:q` | Quit |
@@ -250,7 +253,8 @@ and handy for jumping around or reaching a session you just made:
 **group**; submitting renames/moves or creates it. While the group field is
 focused, the existing groups are listed in the box with the current match
 highlighted — `Tab` steps through them, or type a new name to create a group
-on save.
+on save. On a **group header** row, `e` renames the group and `d` deletes it
+(empty groups only, with confirmation).
 
 #### Panes (tmux-style splits)
 
@@ -369,7 +373,7 @@ ru config path
 | `max_finished` | `QRUSH_MAXFINISHED` | Finished jobs to keep (`-1`: unlimited) | unlimited |
 | `max_conn` | `QRUSH_MAXCONN` | Max client connections | `10` |
 | `on_finish` | `QRUSH_ONFINISH` | Command to run on job completion | — |
-| `save_list` | `QRUSH_SAVELIST` | File to persist job queue | — |
+| `save_list` | `QRUSH_SAVELIST` | Queue snapshot file (`none` disables) | `~/.local/state/qrush/queue.json` |
 
 `QRUSH_SESSION` (environment only) sets the default session when `-g` is
 omitted; the TUI sets it inside session shells. Legacy `TS_*` names are still
@@ -382,15 +386,23 @@ Each job's output is stored in `$TMPDIR/ru_<jobID>_<random>.out` (8 random hex c
 When a job leaves the queue (`ru -x`, `ru -C`, `QRUSH_MAXFINISHED` pruning, or
 deleting its session), its auto-generated output file is deleted with it, so
 the log directory doesn't accumulate orphaned files. Files you named yourself
-with `-O` are never deleted.
+with `-O` are never deleted. `ru gc` sweeps the current log directory for
+generated `ru_*.out` files that no live job references (leftovers from older
+versions or unpersisted queues) — user-named files are never candidates.
 
 ## Architecture
 
 `qrush` is a single binary that acts as both client and server:
 
-- **Server**: A background daemon that manages the job queue, executes jobs, and communicates with clients via Unix domain sockets (Linux/macOS) or TCP on localhost (Windows).
+- **Server**: A background daemon that manages the job queue, executes jobs, and communicates with clients via Unix domain sockets (Linux/macOS) or TCP on localhost (Windows). On Windows, connections must present a random token from the owner-only (0600) port file, so other local users can't drive your daemon.
 - **Client**: Connects to the server to submit jobs, query status, and control execution.
 - The server starts automatically on first client connection and runs until killed with `ru -K`.
+- The daemon logs to `~/.local/state/qrush/daemon.log` (`$XDG_STATE_HOME`
+  respected; rotated to `.old` past ~1MB) — startup info, config warnings, and
+  runtime errors land there, since the detached daemon has no terminal.
+- After upgrading `ru`, a daemon from an older binary is **never killed
+  automatically**: commands refuse with a version message until you run
+  `ru -K` yourself, so running jobs and live panes die only when you decide.
 
 ## Building
 

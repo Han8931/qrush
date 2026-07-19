@@ -43,6 +43,7 @@ const (
 	confirmClear
 	confirmDeleteSession
 	confirmDeleteGroup
+	confirmReset
 )
 
 type confirmState struct {
@@ -170,20 +171,24 @@ type pickerRow struct {
 // creating) it edits the session's name + group; on a job row it grows a job
 // name field on top, so one box edits everything about the row.
 type sessionForm struct {
-	active     bool
-	creating   bool // blank form → SessionCreate; else rename/move
-	jobID      int  // >= 0: job row — show the job-name field; -1 otherwise
-	origLabel  string
-	origName   string
-	origGroup  string
-	labelInput textinput.Model // job name; only rendered when jobID >= 0
-	nameInput  textinput.Model // session name
-	groupInput textinput.Model
-	focusField int // index into inputs(): [job name,] session, group
+	active      bool
+	creating    bool // blank form → SessionCreate; else rename/move
+	groupRename bool // single-field variant: rename the group in origName
+	jobID       int  // >= 0: job row — show the job-name field; -1 otherwise
+	origLabel   string
+	origName    string
+	origGroup   string
+	labelInput  textinput.Model // job name; only rendered when jobID >= 0
+	nameInput   textinput.Model // session name
+	groupInput  textinput.Model
+	focusField  int // index into inputs(): [job name,] session, group
 }
 
 // inputs returns pointers to the form's visible fields in focus order.
 func (f *sessionForm) inputs() []*textinput.Model {
+	if f.groupRename {
+		return []*textinput.Model{&f.nameInput}
+	}
 	if f.jobID >= 0 {
 		return []*textinput.Model{&f.labelInput, &f.nameInput, &f.groupInput}
 	}
@@ -206,7 +211,7 @@ func (f *sessionForm) setFocus(i int) {
 
 // groupFocused reports whether the group field (always last) has focus.
 func (f *sessionForm) groupFocused() bool {
-	return f.focusField == len(f.inputs())-1
+	return !f.groupRename && f.focusField == len(f.inputs())-1
 }
 
 type pagerState struct {
@@ -747,6 +752,8 @@ func (m model) handleJobsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, deleteSession(c.session)
 			case confirmDeleteGroup:
 				return m, deleteGroup(c.group)
+			case confirmReset:
+				return m, resetServerCmd()
 			}
 		}
 		return m, nil
@@ -1111,19 +1118,24 @@ func (m model) handlePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.openSession(r.session)
 		}
 	case "e":
-		if r := p.current(); r != nil && !r.isGroup {
-			session, group := r.session, r.group
+		if r := p.current(); r != nil {
 			m.jobs.picker = sessionPicker{}
-			return m.openSessionForm(false, session, group), textinput.Blink
+			if r.isGroup {
+				return m.openGroupRenameForm(r.group), textinput.Blink
+			}
+			return m.openSessionForm(false, r.session, r.group), textinput.Blink
 		}
 	case "n", "a":
 		m.jobs.picker = sessionPicker{}
 		return m.openSessionForm(true, "", ""), textinput.Blink
 	case "d":
-		if r := p.current(); r != nil && !r.isGroup {
-			session := r.session
+		if r := p.current(); r != nil {
 			m.jobs.picker = sessionPicker{}
-			m.jobs.confirm = confirmState{kind: confirmDeleteSession, session: session}
+			if r.isGroup {
+				m.jobs.confirm = confirmState{kind: confirmDeleteGroup, group: r.group}
+			} else {
+				m.jobs.confirm = confirmState{kind: confirmDeleteSession, session: r.session}
+			}
 			return m, nil
 		}
 	}
@@ -1151,6 +1163,20 @@ func (m model) openSessionForm(creating bool, name, group string) model {
 		origGroup:  group,
 		nameInput:  ni,
 		groupInput: formInput(group),
+	}
+	return m
+}
+
+// openGroupRenameForm shows the one-field modal that renames a group.
+func (m model) openGroupRenameForm(name string) model {
+	ni := formInput(name)
+	ni.Focus()
+	m.jobs.form = sessionForm{
+		active:      true,
+		groupRename: true,
+		jobID:       -1,
+		origName:    name,
+		nameInput:   ni,
 	}
 	return m
 }
@@ -1236,6 +1262,12 @@ func (m model) submitSessionForm() (tea.Model, tea.Cmd) {
 	if name == "" {
 		m.status = "session name required"
 		return m, nil
+	}
+	if f.groupRename {
+		if name == f.origName {
+			return m, nil
+		}
+		return m, renameGroupCmd(f.origName, name)
 	}
 	if f.creating {
 		// Open the new session as soon as the next tree refresh includes it.
@@ -1445,10 +1477,61 @@ func (m model) executeJobsCommand(input string) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "clear":
 		return m, clearFinishedCmd()
+	case "kill":
+		// :kill <id...> | -a/--all | (no arg: current selection)
+		if len(args) > 0 && (args[0] == "-a" || args[0] == "--all") {
+			return m, killAllCmd()
+		}
+		ids, err := m.commandTargetIDs(args)
+		if err != nil {
+			m.status = err.Error()
+			return m, nil
+		}
+		m.jobs.visual = false
+		m.jobs.tagged = nil
+		return m, killJobs(ids)
+	case "restart":
+		// :restart <id...> | -a/--all | (no arg: current selection). Running
+		// jobs are killed first; every non-queued target is re-enqueued.
+		if len(args) > 0 && (args[0] == "-a" || args[0] == "--all") {
+			return m, restartAllCmd()
+		}
+		ids, err := m.commandTargetIDs(args)
+		if err != nil {
+			m.status = err.Error()
+			return m, nil
+		}
+		m.jobs.visual = false
+		m.jobs.tagged = nil
+		return m, restartJobs(ids)
+	case "reset":
+		m.jobs.confirm = confirmState{kind: confirmReset}
+		return m, nil
 	default:
 		m.status = fmt.Sprintf("unknown command: %s", input)
 	}
 	return m, nil
+}
+
+// commandTargetIDs resolves a `:` command's job targets: explicit ids from
+// its arguments, else the current selection (tagged / visual / cursor row).
+func (m model) commandTargetIDs(args []string) ([]int, error) {
+	if len(args) == 0 {
+		ids := m.jobsActionIDs()
+		if len(ids) == 0 {
+			return nil, fmt.Errorf("no job selected")
+		}
+		return ids, nil
+	}
+	ids := make([]int, 0, len(args))
+	for _, a := range args {
+		id, err := strconv.Atoi(a)
+		if err != nil {
+			return nil, fmt.Errorf("invalid job id %q", a)
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
 }
 
 func parseSortMode(s string) (sortMode, bool) {
@@ -1463,6 +1546,76 @@ func parseSortMode(s string) (sortMode, bool) {
 		return sortByTime, true
 	}
 	return sortGrouped, false
+}
+
+func killAllCmd() tea.Cmd {
+	return func() tea.Msg {
+		if err := client.KillAllJobs(); err != nil {
+			return actionDoneMsg{err: err}
+		}
+		return actionDoneMsg{status: "killed all running jobs"}
+	}
+}
+
+// restartJobsMsg kills the running targets and re-enqueues every non-queued
+// one; queued targets are already pending and left alone.
+func restartJobsMsg(jobs []protocol.JobInfo) tea.Msg {
+	count := 0
+	for _, j := range jobs {
+		if j.State == protocol.StateQueued {
+			continue
+		}
+		if j.State == protocol.StateRunning {
+			_ = client.KillJob(j.ID)
+		}
+		if _, err := client.Rerun(j.ID); err != nil {
+			return actionDoneMsg{err: err}
+		}
+		count++
+	}
+	return actionDoneMsg{status: fmt.Sprintf("restarted %d job(s)", count)}
+}
+
+func restartJobs(ids []int) tea.Cmd {
+	return func() tea.Msg {
+		jobs := make([]protocol.JobInfo, 0, len(ids))
+		for _, id := range ids {
+			info, err := client.GetInfo(id)
+			if err != nil {
+				return actionDoneMsg{err: err}
+			}
+			jobs = append(jobs, *info)
+		}
+		return restartJobsMsg(jobs)
+	}
+}
+
+func restartAllCmd() tea.Cmd {
+	return func() tea.Msg {
+		res, err := client.ListJobs()
+		if err != nil {
+			return actionDoneMsg{err: err}
+		}
+		return restartJobsMsg(res.Jobs)
+	}
+}
+
+func renameGroupCmd(oldName, newName string) tea.Cmd {
+	return func() tea.Msg {
+		if err := client.GroupRename(oldName, newName); err != nil {
+			return actionDoneMsg{err: err}
+		}
+		return actionDoneMsg{status: fmt.Sprintf("renamed group %q -> %q", oldName, newName)}
+	}
+}
+
+func resetServerCmd() tea.Cmd {
+	return func() tea.Msg {
+		if err := client.ResetServer(); err != nil {
+			return actionDoneMsg{err: err}
+		}
+		return actionDoneMsg{status: "daemon reset to defaults"}
+	}
 }
 
 func setMaxSlotsCmd(n int) tea.Cmd {
@@ -2006,6 +2159,8 @@ func (m model) sessionFormLines(bodyH, inner int) []string {
 	switch {
 	case f.creating:
 		title = "New session"
+	case f.groupRename:
+		title = "Rename group"
 	case f.jobID >= 0:
 		title = fmt.Sprintf("Edit job %d", f.jobID)
 	}
@@ -2029,7 +2184,10 @@ func (m model) sessionFormLines(bodyH, inner int) []string {
 	}
 
 	labels := []string{"name", "group"}
-	if f.jobID >= 0 {
+	switch {
+	case f.groupRename:
+		labels = []string{"name"}
+	case f.jobID >= 0:
 		labels = []string{"name", "session", "group"}
 	}
 	inputs := (&f).inputs()
@@ -2139,6 +2297,9 @@ func (m model) helpLines(bodyH, inner int) []string {
 		row(":set slots N", "set parallel jobs"),
 		row(":set logdir P", "set log directory"),
 		row(":config", "settings box (slots, logdir)"),
+		row(":kill id|-a", "kill job(s) / all running"),
+		row(":restart id|-a", "kill + re-enqueue job(s)"),
+		row(":reset", "factory-reset qrush (confirms)"),
 		row("q", "quit"),
 		row("esc", "back to the open session"),
 		"",
@@ -2327,6 +2488,8 @@ func (m model) jobsFooter(w int) string {
 			q = fmt.Sprintf(" delete session %q? (y/n) ", m.jobs.confirm.session)
 		case confirmDeleteGroup:
 			q = fmt.Sprintf(" delete group %q? (y/n) ", m.jobs.confirm.group)
+		case confirmReset:
+			q = " reset qrush? kills all jobs & panes, deletes sessions, restores default settings (y/n) "
 		default:
 			q = " clear all finished jobs? (y/n) "
 		}

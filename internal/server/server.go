@@ -103,7 +103,16 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 
 		if s.maxConns > 0 && int(s.activeConns.Load()) >= s.maxConns {
-			conn.Close()
+			// Tell the client why instead of silently closing (which surfaced
+			// as a baffling EOF). Sent from a goroutine so a stalled client
+			// can't block the accept loop.
+			go func(c net.Conn) {
+				_ = protocol.Send(c, &protocol.Msg{
+					Type:    protocol.MsgError,
+					Payload: protocol.PayloadError{Message: fmt.Sprintf("too many connections (max %d)", s.maxConns)},
+				})
+				c.Close()
+			}(conn)
 			continue
 		}
 
@@ -256,6 +265,8 @@ func (s *Server) dispatch(ctx context.Context, conn net.Conn, msg *protocol.Msg)
 		return s.handleTerminalListAll(conn)
 	case protocol.MsgTUIAttach:
 		return s.handleTUIAttach(conn)
+	case protocol.MsgReset:
+		return s.handleReset(conn)
 	default:
 		s.sendError(conn, "unknown message type")
 		return true
@@ -427,6 +438,12 @@ func (s *Server) handleSwapJobs(conn net.Conn, msg *protocol.Msg) bool {
 }
 
 func (s *Server) handleWaitJob(ctx context.Context, conn net.Conn, msg *protocol.Msg) bool {
+	// A wait can block for the job's whole runtime — don't let it hold one of
+	// the maxConns slots, or a handful of `ru -w` would lock everyone out
+	// (terminal and TUI attaches are exempted the same way).
+	s.activeConns.Add(-1)
+	defer s.activeConns.Add(1)
+
 	payload, err := protocol.PayloadAs[protocol.PayloadJobID](msg)
 	if err != nil {
 		return s.sendError(conn, err.Error())
@@ -755,6 +772,25 @@ func (s *Server) handleTUIAttach(conn net.Conn) bool {
 	}
 	s.mu.Unlock()
 	return false
+}
+
+// handleReset restores the daemon to a fresh state: every running job and
+// pane is killed, all jobs/sessions/groups dropped (defaults kept), and the
+// runtime settings return to their defaults (persisted overrides cleared).
+func (s *Server) handleReset(conn net.Conn) bool {
+	s.executor.KillAll()
+	s.terminals.Reset()
+	s.jobs.Reset()
+	s.scheduler.SetMaxSlots(1)
+	s.executor.SetLogDir(s.cfg.TmpDir)
+	if err := config.DeleteRuntime("slots"); err != nil {
+		log.Printf("reset: clear slots override: %v", err)
+	}
+	if err := config.DeleteRuntime("logdir"); err != nil {
+		log.Printf("reset: clear logdir override: %v", err)
+	}
+	log.Printf("daemon reset to defaults")
+	return s.sendMsg(conn, &protocol.Msg{Type: protocol.MsgActionOK})
 }
 
 func (s *Server) pruneFinished() {

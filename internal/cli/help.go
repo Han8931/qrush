@@ -83,6 +83,7 @@ Log directory:
   --set_logdir <path> Set log directory
 
 Other:
+  gc                  Delete orphaned job-output files from the log directory
   -V                  Show version
   -h                  Show this help
 

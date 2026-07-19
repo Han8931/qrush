@@ -115,6 +115,10 @@ const (
 	// MsgTUITakenOver and disconnected (tmux `attach -d` semantics).
 	MsgTUIAttach
 	MsgTUITakenOver
+	// MsgReset factory-resets the daemon: kills all running jobs and panes,
+	// drops every job/session/group (defaults kept), and restores default
+	// runtime settings. Answered with MsgActionOK.
+	MsgReset
 )
 
 type Msg struct {
@@ -391,6 +395,11 @@ func PayloadAs[T any](msg *Msg) (T, error) {
 	payload, ok := msg.Payload.(T)
 	if !ok {
 		var zero T
+		// A server-side error in place of the expected payload should surface
+		// as its message, not as a payload-type mismatch.
+		if pe, isErr := msg.Payload.(PayloadError); isErr {
+			return zero, fmt.Errorf("%s", pe.Message)
+		}
 		return zero, fmt.Errorf("expected %T, got %T", zero, msg.Payload)
 	}
 	return payload, nil

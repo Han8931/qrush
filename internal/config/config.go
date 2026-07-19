@@ -50,6 +50,9 @@ func LoadDetailed() (*Config, []Setting, []string) {
 		Slots:       atoi(get("slots"), 1),
 		Logdir:      get("logdir"),
 	}
+	if saveListDisabled(c.SaveList) {
+		c.SaveList = ""
+	}
 
 	c.TmpDir = os.Getenv("TMPDIR")
 	if c.TmpDir == "" {

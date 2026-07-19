@@ -61,6 +61,7 @@ const (
 	ActionConfigSet
 	ActionConfigEdit
 	ActionConfigPath
+	ActionGC
 )
 
 type Command struct {
@@ -125,6 +126,10 @@ func Parse(args []string) (*Command, error) {
 	}
 	if args[0] == "config" {
 		return parseConfigSubcommand(cmd, args[1:])
+	}
+	if args[0] == "gc" {
+		cmd.Action = ActionGC
+		return cmd, nil
 	}
 
 	i := 0

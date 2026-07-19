@@ -166,6 +166,14 @@ func (m *TerminalManager) Kill(session, pane string) {
 	}
 }
 
+// Reset kills every pane and forgets all persisted layouts (used by `:reset`).
+func (m *TerminalManager) Reset() {
+	m.mu.Lock()
+	m.layouts = make(map[string][]byte)
+	m.mu.Unlock()
+	m.KillAll()
+}
+
 func (m *TerminalManager) KillAll() {
 	m.mu.Lock()
 	terms := make([]*TerminalPTY, 0, len(m.sessions))

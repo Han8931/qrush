@@ -1,12 +1,14 @@
 package client
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"time"
 
+	"github.com/han/qrush/internal/config"
 	"github.com/han/qrush/internal/ipc"
 	"github.com/han/qrush/internal/protocol"
 )
@@ -42,51 +44,52 @@ func EnsureServer() error {
 	dialer := ipc.NewDialer(path)
 	conn, err := dialer.Dial()
 	if err == nil {
-		ok := serverVersionOK(conn)
+		version, vErr := serverVersion(conn)
 		conn.Close()
-		if ok {
+		switch {
+		case vErr == nil && version == protocol.ProtocolVersion:
 			return nil
+		case vErr == nil:
+			// A daemon is listening but speaks a different protocol. Never
+			// kill it automatically: it may be running jobs and hosting live
+			// shell panes. The user decides when those may die.
+			return fmt.Errorf("running daemon speaks protocol v%d, this ru speaks v%d — finish its work, then `ru -K` and retry",
+				version, protocol.ProtocolVersion)
+		default:
+			var refused errDaemonRefused
+			if errors.As(vErr, &refused) {
+				// Our daemon, but it turned us away (e.g. connection cap).
+				return fmt.Errorf("daemon: %s", refused.msg)
+			}
+			return fmt.Errorf("something unrecognised is listening on %s — stop it or point QRUSH_SOCKET elsewhere", path)
 		}
-		_ = killExistingServer(dialer)
-		waitForServerStop(dialer)
 	}
 
 	return startServer(dialer)
 }
 
-func serverVersionOK(conn net.Conn) bool {
+// errDaemonRefused marks a well-formed MsgError refusal from a live qrush
+// daemon (as opposed to garbage from an unrelated listener).
+type errDaemonRefused struct{ msg string }
+
+func (e errDaemonRefused) Error() string { return e.msg }
+
+func serverVersion(conn net.Conn) (int, error) {
 	if err := protocol.Send(conn, &protocol.Msg{Type: protocol.MsgGetVersion}); err != nil {
-		return false
+		return 0, err
 	}
 	msg, err := protocol.Recv(conn)
-	if err != nil || msg.Type != protocol.MsgVersion {
-		return false
+	if err != nil {
+		return 0, err
 	}
 	payload, err := protocol.PayloadAs[protocol.PayloadVersion](msg)
 	if err != nil {
-		return false
-	}
-	return payload.Version == protocol.ProtocolVersion
-}
-
-func killExistingServer(dialer ipc.Dialer) error {
-	conn, err := dialer.Dial()
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-	return protocol.Send(conn, &protocol.Msg{Type: protocol.MsgKillServer})
-}
-
-func waitForServerStop(dialer ipc.Dialer) {
-	for i := 0; i < 20; i++ {
-		conn, err := dialer.Dial()
-		if err != nil {
-			return
+		if msg.Type == protocol.MsgError {
+			return 0, errDaemonRefused{msg: err.Error()}
 		}
-		conn.Close()
-		time.Sleep(100 * time.Millisecond)
+		return 0, err
 	}
+	return payload.Version, nil
 }
 
 func startServer(dialer ipc.Dialer) error {
@@ -114,5 +117,9 @@ func startServer(dialer ipc.Dialer) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("server failed to start within 5 seconds")
+	hint := ""
+	if p := config.DaemonLogPath(); p != "" {
+		hint = " (see " + p + ")"
+	}
+	return fmt.Errorf("server failed to start within 5 seconds%s", hint)
 }

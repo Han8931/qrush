@@ -660,6 +660,20 @@ func SetLogdir(path string) error {
 	return recvOK(c)
 }
 
+// ResetServer factory-resets the daemon: kills all jobs and panes, drops all
+// sessions/groups, and restores default settings.
+func ResetServer() error {
+	c, err := Connect()
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	if err := c.Send(&protocol.Msg{Type: protocol.MsgReset}); err != nil {
+		return err
+	}
+	return recvOK(c)
+}
+
 func recvOK(c *Client) error {
 	msg, err := c.Recv()
 	if err != nil {

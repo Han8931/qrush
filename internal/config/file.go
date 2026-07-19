@@ -57,7 +57,7 @@ var Keys = []Key{
 	{Name: "on_finish", EnvVar: "QRUSH_ONFINISH", LegacyEnv: "TS_ONFINISH", Default: "",
 		Desc: "command run after each job finishes"},
 	{Name: "save_list", EnvVar: "QRUSH_SAVELIST", LegacyEnv: "TS_SAVELIST", Default: "",
-		Desc: "file persisting the job queue across restarts", IsPath: true},
+		Desc: "queue snapshot file ('none' disables; default: state dir)", IsPath: true},
 }
 
 // KeyByName returns the Key metadata for a config name.
@@ -116,6 +116,17 @@ func RuntimeStatePath() string {
 		return ""
 	}
 	return filepath.Join(d, "runtime")
+}
+
+// DaemonLogPath returns the daemon's log file path. The daemon is spawned
+// with stdout/stderr discarded, so this file is the only place its log output
+// can go.
+func DaemonLogPath() string {
+	d := stateDir()
+	if d == "" {
+		return ""
+	}
+	return filepath.Join(d, "daemon.log")
 }
 
 // parseKV parses `key = value` lines; '#' starts a comment, blanks skipped.
@@ -207,9 +218,25 @@ func loadSettings() ([]Setting, []string) {
 				apply(v, SourceRuntime, "runtime state")
 			}
 		}
+		if k.Name == "save_list" && s.Value == "" {
+			// Persistence is on by default so restarts don't forget the queue;
+			// an explicit `save_list = none` turns it off.
+			if d := stateDir(); d != "" {
+				s.Value = filepath.Join(d, "queue.json")
+			}
+		}
 		settings = append(settings, s)
 	}
 	return settings, warnings
+}
+
+// saveListDisabled reports whether a save_list value means "don't persist".
+func saveListDisabled(v string) bool {
+	switch strings.ToLower(v) {
+	case "none", "off", "disabled":
+		return true
+	}
+	return false
 }
 
 func writeFileAtomic(path string, data []byte) error {
