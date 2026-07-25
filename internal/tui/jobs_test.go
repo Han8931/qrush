@@ -13,6 +13,39 @@ import (
 	"github.com/han/qrush/internal/sysmon"
 )
 
+// The implicit "default" session is never surfaced in the flat table: it gets
+// no empty placeholder row, and jobs in it show a blank SESSION cell.
+func TestDefaultSessionHidden(t *testing.T) {
+	if got := displaySession("default"); got != "" {
+		t.Errorf("displaySession(default) = %q, want empty", got)
+	}
+	if got := displaySession("work"); got != "work" {
+		t.Errorf("displaySession(work) = %q, want %q", got, "work")
+	}
+
+	// An empty default-only queue produces no rows (no placeholder).
+	sessions := []protocol.SessionInfo{{Name: "default", Group: "default"}}
+	m := model{viewMode: viewJobs, nodes: buildTree([]string{"default"}, sessions, nil)}
+	for _, r := range m.buildMgmtRows() {
+		if r.kind == rowSession && r.session == "default" {
+			t.Errorf("default empty session must not appear as a placeholder row")
+		}
+	}
+
+	// A named empty session still appears.
+	sessions = append(sessions, protocol.SessionInfo{Name: "build", Group: "default"})
+	m.nodes = buildTree([]string{"default"}, sessions, nil)
+	found := false
+	for _, r := range m.buildMgmtRows() {
+		if r.kind == rowSession && r.session == "build" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("named empty session 'build' should still appear as a row")
+	}
+}
+
 func quitsOn(t *testing.T, cmd tea.Cmd) bool {
 	t.Helper()
 	if cmd == nil {

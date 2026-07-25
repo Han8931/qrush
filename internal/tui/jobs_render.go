@@ -57,6 +57,15 @@ func formatJobRow(j protocol.JobInfo, group string, c columnWidths) string {
 // highlight: every cell — and the padding within it — carries that background,
 // while each cell keeps its own semantic foreground. This lets the focused row
 // stay tinted without flattening the state colors (running=green, failed=red).
+// displaySession hides the implicit "default" session name in the flat table —
+// a job with no explicit session reads as an empty SESSION cell, not "default".
+func displaySession(name string) string {
+	if name == "default" {
+		return ""
+	}
+	return name
+}
+
 func renderJobsRow(j protocol.JobInfo, group string, c columnWidths, bg lipgloss.TerminalColor) string {
 	timeStr := ""
 	if j.State == protocol.StateRunning || j.State == protocol.StateFinished {
@@ -81,7 +90,7 @@ func renderJobsRow(j protocol.JobInfo, group string, c columnWidths, bg lipgloss
 	}
 	id := cell(fmt.Sprintf("%*d", c.id, j.ID), c.id, jobIDStyle)
 	grp := cell(group, c.group, groupStyle)
-	sess := cell(j.Session, c.session, sessionStyle)
+	sess := cell(displaySession(j.Session), c.session, sessionStyle)
 	state := cell(stateTxt, c.state, stateStyle)
 	tm := cell(timeStr, c.tm, lipgloss.NewStyle())
 	timeoutTxt, timeoutStyle := "-", treeEmptyStyle
@@ -216,7 +225,7 @@ func (m model) mgmtBodyLines(bodyH, inner int, cols columnWidths) []string {
 	if len(m.jobs.rows) == 0 {
 		for i := 0; i < bodyH; i++ {
 			if i == bodyH/2 {
-				out = append(out, treeEmptyStyle.Render(centerText("(no sessions)", inner)))
+				out = append(out, treeEmptyStyle.Render(centerText("(no jobs)", inner)))
 			} else {
 				out = append(out, "")
 			}
@@ -277,7 +286,7 @@ func renderSessionRow(group, session string, c columnWidths, bg lipgloss.Termina
 	}
 	id := cell("·", c.id, treeEmptyStyle)
 	grp := cell(group, c.group, groupStyle)
-	sess := cell(session, c.session, sessionStyle)
+	sess := cell(displaySession(session), c.session, sessionStyle)
 	state := cell("no jobs", c.state, treeEmptyStyle)
 	tm := cell("", c.tm, lipgloss.NewStyle())
 	timeout := cell("", c.timeout, lipgloss.NewStyle())
@@ -360,7 +369,7 @@ func (m model) helpLines(bodyH, inner int) []string {
 		jobsDetailKeyStyle.Render("  Sessions & jobs"),
 		row("⏎", "job output (session if empty)"),
 		row("o", "open the output pager"),
-		row("S", "session picker (incl. empty)"),
+		row("S", "session picker: open/new/edit, d deletes"),
 		row("e", "edit row: name/session/group"),
 		row("n / a", "new session"),
 		row("x / u / r", "kill / urgent / rerun job"),
@@ -514,7 +523,7 @@ func (m model) jobsDetailLines(maxLines, inner int) []string {
 		out = append(out, styleJobDetailLine("name: "+r.session, inner))
 		out = append(out, styleJobDetailLine("group: "+r.group, inner))
 		out = append(out, styleJobDetailLine("jobs: 0 (empty)", inner))
-		out = append(out, styleJobDetailLine("open: enter · edit: e · delete via s", inner))
+		out = append(out, styleJobDetailLine("open: enter · edit: e · delete: S then d", inner))
 	}
 	for len(out) < maxLines {
 		out = append(out, "")

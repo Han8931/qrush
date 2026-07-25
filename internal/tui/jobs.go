@@ -172,6 +172,11 @@ func (m model) buildMgmtRows() []mgmtRow {
 		for _, session := range node.sessions {
 			jobs := filterJobs(node.jobs[session.Name], m.jobs.filter, "", true)
 			if len(jobs) == 0 {
+				// The implicit "default" session is where unassigned jobs land; it
+				// always exists, so never surface it as an empty placeholder row.
+				if session.Name == "default" {
+					continue
+				}
 				// Hide empty sessions only when a text filter is active and the
 				// session name itself doesn't match.
 				if m.jobs.filter != "" && !strings.Contains(strings.ToLower(session.Name), strings.ToLower(m.jobs.filter)) {
