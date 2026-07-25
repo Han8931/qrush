@@ -273,23 +273,15 @@ func (m model) mgmtBodyLines(bodyH, inner int, cols columnWidths) []string {
 		}
 		r := m.jobs.rows[idx]
 		isCursor := idx == m.jobs.cursor
-		inSel := r.kind == rowJob &&
-			((m.jobs.visual && idx >= selLo && idx <= selHi) || m.jobs.tagged[r.job.ID])
+		inSel := (m.jobs.visual && idx >= selLo && idx <= selHi) || m.jobs.tagged[r.job.ID]
 		out = append(out, m.renderMgmtRow(r, cols, inner, isCursor, inSel))
 	}
 	return out
 }
 
-// renderMgmtRow renders one management-list row with the right highlight. Job
-// rows keep their per-column semantic colors under the focus tint; group and
-// session headers are free-form lines.
+// renderMgmtRow renders one job row with the right highlight, keeping each
+// column's semantic color under the focus tint / selection background.
 func (m model) renderMgmtRow(r mgmtRow, cols columnWidths, inner int, isCursor, inSel bool) string {
-	if r.kind == rowSession {
-		if isCursor {
-			return padRowBg(renderSessionRow(r.group, r.session, cols, cRowFocusBg), inner, cRowFocusBg)
-		}
-		return renderSessionRow(r.group, r.session, cols, nil)
-	}
 	switch {
 	case isCursor:
 		return padRowBg(renderJobsRow(r.job, r.group, cols, cRowFocusBg), inner, cRowFocusBg)
@@ -298,30 +290,6 @@ func (m model) renderMgmtRow(r mgmtRow, cols columnWidths, inner int, isCursor, 
 	default:
 		return formatJobRow(r.job, r.group, cols)
 	}
-}
-
-// renderSessionRow renders a placeholder line for a session with no jobs, so it
-// stays visible in the table. The columns align with job rows.
-func renderSessionRow(group, session string, c columnWidths, bg lipgloss.TerminalColor) string {
-	cell := func(text string, w int, style lipgloss.Style) string {
-		if bg != nil {
-			style = style.Background(bg)
-		}
-		return style.Render(fitToWidth(stripAnsi(text), w))
-	}
-	sep := " "
-	if bg != nil {
-		sep = lipgloss.NewStyle().Background(bg).Render(" ")
-	}
-	id := cell("·", c.id, treeEmptyStyle)
-	grp := cell(group, c.group, groupStyle)
-	sess := cell(displaySession(session), c.session, sessionStyle)
-	state := cell("no jobs", c.state, treeEmptyStyle)
-	tm := cell("", c.tm, lipgloss.NewStyle())
-	timeout := cell("", c.timeout, lipgloss.NewStyle())
-	name := cell("", c.name, lipgloss.NewStyle())
-	command := cell("— empty session · ⏎ to open", c.command, treeEmptyStyle)
-	return id + sep + sep + sep + grp + sep + sess + sep + state + sep + tm + sep + timeout + sep + name + sep + command
 }
 
 // modalInnerWidth picks a modal's inner width: a comfortable fixed size that
@@ -549,12 +517,6 @@ func (m model) jobsDetailLines(maxLines, inner int) []string {
 			}
 			out = append(out, styleJobDetailLine(il, inner))
 		}
-	} else if r, ok := m.jobsCursorRow(); ok && r.kind == rowSession {
-		rule(" session ")
-		out = append(out, styleJobDetailLine("name: "+r.session, inner))
-		out = append(out, styleJobDetailLine("group: "+r.group, inner))
-		out = append(out, styleJobDetailLine("jobs: 0 (empty)", inner))
-		out = append(out, styleJobDetailLine("open: enter · edit: e · delete: S then d", inner))
 	}
 	for len(out) < maxLines {
 		out = append(out, "")

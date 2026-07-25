@@ -56,24 +56,13 @@ const (
 	pagerByteCap     = 1 << 20 // 1 MiB tail cap for the output pager
 )
 
-// mgmtRowKind tags a row in the flat management table: a job, or a placeholder
-// for a session that currently has no jobs (so every session stays visible).
-// Job-action code guards on rowJob, so session rows are naturally excluded.
-type mgmtRowKind int
-
-const (
-	rowJob mgmtRowKind = iota
-	rowSession
-)
-
-// mgmtRow is one line in the flat management table. Job rows carry a job;
-// session rows are placeholders for job-less sessions. Both carry group +
-// session so Enter can open the session and the columns can be filled.
+// mgmtRow is one line in the flat management table. The list is jobs-only;
+// sessions/groups are browsed and managed from the tree sidebar. session and
+// group are carried alongside the job so the columns and sort can use them.
 type mgmtRow struct {
-	kind    mgmtRowKind
 	session string           // session name
 	group   string           // group name
-	job     protocol.JobInfo // the job payload (rowJob only)
+	job     protocol.JobInfo // the job payload
 }
 
 // sortMode selects how the flat job table is ordered.
@@ -170,30 +159,16 @@ func (m model) collectJobs() []protocol.JobInfo {
 }
 
 // buildMgmtRows flattens every session's jobs into one flat table, applying the
-// active filter and the current sort. A session with no matching jobs still gets
-// one placeholder row so every session stays visible.
+// active filter and the current sort. The list is jobs-only: empty sessions are
+// browsed and opened from the tree sidebar, not shown here as placeholder rows.
 func (m model) buildMgmtRows() []mgmtRow {
 	var out []mgmtRow
 	for _, node := range m.nodes {
 		for _, session := range node.sessions {
 			jobs := filterJobs(node.jobs[session.Name], m.jobs.filter, "", true)
-			if len(jobs) == 0 {
-				// The implicit "default" session is where unassigned jobs land; it
-				// always exists, so never surface it as an empty placeholder row.
-				if session.Name == "default" {
-					continue
-				}
-				// Hide empty sessions only when a text filter is active and the
-				// session name itself doesn't match.
-				if m.jobs.filter != "" && !strings.Contains(strings.ToLower(session.Name), strings.ToLower(m.jobs.filter)) {
-					continue
-				}
-				out = append(out, mgmtRow{kind: rowSession, session: session.Name, group: node.group})
-				continue
-			}
 			for _, j := range jobs {
 				out = append(out, mgmtRow{
-					kind: rowJob, session: session.Name, group: node.group, job: j,
+					session: session.Name, group: node.group, job: j,
 				})
 			}
 		}
@@ -252,9 +227,6 @@ func stateRank(j protocol.JobInfo) int {
 
 // rowKey is a stable identity for a row so the cursor survives refresh/resort.
 func rowKey(r mgmtRow) string {
-	if r.kind == rowSession {
-		return "s:" + r.session
-	}
 	return fmt.Sprintf("j:%d", r.job.ID)
 }
 
@@ -310,9 +282,7 @@ func anchorMgmtCursor(rows []mgmtRow, key string, prev int) (int, string) {
 func (m model) visibleJobs() []protocol.JobInfo {
 	var out []protocol.JobInfo
 	for _, r := range m.jobs.rows {
-		if r.kind == rowJob {
-			out = append(out, r.job)
-		}
+		out = append(out, r.job)
 	}
 	return out
 }
@@ -325,9 +295,9 @@ func (m model) jobsCursorRow() (mgmtRow, bool) {
 	return mgmtRow{}, false
 }
 
-// jobsSelected returns the job under the cursor, only when it is a job row.
+// jobsSelected returns the job under the cursor, if any.
 func (m model) jobsSelected() (protocol.JobInfo, bool) {
-	if r, ok := m.jobsCursorRow(); ok && r.kind == rowJob {
+	if r, ok := m.jobsCursorRow(); ok {
 		return r.job, true
 	}
 	return protocol.JobInfo{}, false
@@ -558,7 +528,7 @@ func (m model) handleJobsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case " ":
 		// ranger/lf-style tagging: toggle the cursor job's selection, then
 		// advance one row. Esc clears; actions consume the tagged set.
-		if r, ok := m.jobsCursorRow(); ok && r.kind == rowJob {
+		if r, ok := m.jobsCursorRow(); ok {
 			if m.jobs.tagged == nil {
 				m.jobs.tagged = make(map[int]bool)
 			}
@@ -609,13 +579,10 @@ func (m model) handleJobsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.refreshJobsRows()
 		return m, nil
 	case "e":
-		// Edit the cursor row in one box: a job row gets job name + session +
-		// group; a session row gets session name + group.
+		// Edit the cursor job in one box: job name + session + group. (Sessions
+		// and groups are edited from the tree sidebar.)
 		if r, ok := m.jobsCursorRow(); ok {
-			if r.kind == rowJob {
-				return m.openJobEditForm(r.job, r.group), textinput.Blink
-			}
-			return m.openSessionForm(false, r.session, r.group), textinput.Blink
+			return m.openJobEditForm(r.job, r.group), textinput.Blink
 		}
 	case "n", "a":
 		// Create a new session via the edit box (blank form).
@@ -717,18 +684,14 @@ func (m model) leaveManagement() (tea.Model, tea.Cmd) {
 	return m, tea.Batch(clearScreenCmd(), tea.DisableMouse)
 }
 
-// activateRow handles Enter: a job row opens its output pager (like `o`); an
-// empty-session placeholder row opens that session's shell panes. Sessions with
-// jobs are reachable via the picker (`S`).
+// activateRow handles Enter on a job row: open its output pager (like `o`).
+// Sessions are opened from the tree sidebar or the picker (`S`).
 func (m model) activateRow() (tea.Model, tea.Cmd) {
 	r, ok := m.jobsCursorRow()
 	if !ok {
 		return m, nil
 	}
-	if r.kind == rowJob {
-		return m, openPagerCmd(r.job)
-	}
-	return m.openSession(r.session)
+	return m, openPagerCmd(r.job)
 }
 
 // openSession leaves the management view and activates the given session,
@@ -813,7 +776,7 @@ func (m model) jobsActionRows() []protocol.JobInfo {
 	if len(m.jobs.tagged) > 0 {
 		var rows []protocol.JobInfo
 		for _, r := range m.jobs.rows {
-			if r.kind == rowJob && m.jobs.tagged[r.job.ID] {
+			if m.jobs.tagged[r.job.ID] {
 				rows = append(rows, r.job)
 			}
 		}
@@ -825,7 +788,7 @@ func (m model) jobsActionRows() []protocol.JobInfo {
 		lo, hi := m.visualRange()
 		var rows []protocol.JobInfo
 		for i := lo; i <= hi && i < len(m.jobs.rows); i++ {
-			if i >= 0 && m.jobs.rows[i].kind == rowJob {
+			if i >= 0 {
 				rows = append(rows, m.jobs.rows[i].job)
 			}
 		}

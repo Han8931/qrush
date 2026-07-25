@@ -13,36 +13,30 @@ import (
 	"github.com/han/qrush/internal/sysmon"
 )
 
-// The implicit "default" session is never surfaced in the flat table: it gets
-// no empty placeholder row, and jobs in it show a blank SESSION cell.
-func TestDefaultSessionHidden(t *testing.T) {
+// displaySession blanks the implicit "default" so job rows read as
+// "no explicit session" in the SESSION column.
+func TestDisplaySession(t *testing.T) {
 	if got := displaySession("default"); got != "" {
 		t.Errorf("displaySession(default) = %q, want empty", got)
 	}
 	if got := displaySession("work"); got != "work" {
 		t.Errorf("displaySession(work) = %q, want %q", got, "work")
 	}
+}
 
-	// An empty default-only queue produces no rows (no placeholder).
-	sessions := []protocol.SessionInfo{{Name: "default", Group: "default"}}
-	m := model{viewMode: viewJobs, nodes: buildTree([]string{"default"}, sessions, nil)}
-	for _, r := range m.buildMgmtRows() {
-		if r.kind == rowSession && r.session == "default" {
-			t.Errorf("default empty session must not appear as a placeholder row")
-		}
+// The flat list is jobs-only: empty sessions (default or named) never appear —
+// they're browsed and opened from the tree sidebar instead.
+func TestListIsJobsOnly(t *testing.T) {
+	sessions := []protocol.SessionInfo{
+		{Name: "default", Group: "default"},
+		{Name: "build", Group: "default"}, // empty, named
 	}
+	jobs := []protocol.JobInfo{{ID: 1, Session: "default"}}
+	m := model{viewMode: viewJobs, nodes: buildTree([]string{"default"}, sessions, jobs)}
 
-	// A named empty session still appears.
-	sessions = append(sessions, protocol.SessionInfo{Name: "build", Group: "default"})
-	m.nodes = buildTree([]string{"default"}, sessions, nil)
-	found := false
-	for _, r := range m.buildMgmtRows() {
-		if r.kind == rowSession && r.session == "build" {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("named empty session 'build' should still appear as a row")
+	rows := m.buildMgmtRows()
+	if len(rows) != 1 || rows[0].job.ID != 1 {
+		t.Fatalf("expected exactly the one job row, got %d rows", len(rows))
 	}
 }
 
@@ -113,7 +107,7 @@ func runeKey(r string) tea.KeyMsg {
 func TestJobEditFormFields(t *testing.T) {
 	j := protocol.JobInfo{ID: 7, Label: "lbl", Session: "work"}
 	m := model{viewMode: viewJobs}
-	m.jobs.rows = []mgmtRow{{kind: rowJob, job: j, session: "work", group: "grp"}}
+	m.jobs.rows = []mgmtRow{{job: j, session: "work", group: "grp"}}
 
 	got, _ := m.handleJobsKey(runeKey("e"))
 	fm := got.(model)
@@ -233,7 +227,7 @@ func TestJobsSpaceToggleUntags(t *testing.T) {
 func jobRows(jobs []protocol.JobInfo) []mgmtRow {
 	rows := make([]mgmtRow, len(jobs))
 	for i, j := range jobs {
-		rows[i] = mgmtRow{kind: rowJob, job: j, session: j.Session}
+		rows[i] = mgmtRow{job: j, session: j.Session}
 	}
 	return rows
 }
