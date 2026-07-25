@@ -574,10 +574,10 @@ func (m model) jobsFooter(w int) string {
 		lo, hi := m.visualRange()
 		modeText, modeStyle = fmt.Sprintf(" VISUAL %d ", hi-lo+1), modeInsertStyle
 	}
-	left := []statusSegment{
-		{text: modeText, style: modeStyle},
-		{text: fmt.Sprintf(" sort:%s%s ", m.jobs.sortMode.label(), sortArrow(m.jobs.sortRev)), style: airlineFocus},
-	}
+	// The sort field/direction already shows as an arrow on the sorted column
+	// header, so it isn't repeated here — the left side stays just the mode
+	// plus transient context (selection, filter, last action).
+	left := []statusSegment{{text: modeText, style: modeStyle}}
 	if n := len(m.jobs.tagged); n > 0 {
 		left = append(left, statusSegment{text: fmt.Sprintf(" sel %d ", n), style: modeInsertStyle})
 	}
@@ -587,25 +587,29 @@ func (m model) jobsFooter(w int) string {
 	if m.status != "" {
 		left = append(left, statusSegment{text: " " + shorten(m.status, 60) + " ", style: airlineInfo})
 	}
-	// Right side stays calm: one compact stats segment (fail only when it
-	// exists, as its own red chip) and a single pointer to the help overlay
-	// instead of a cheat-sheet crammed into the bar.
+	// Right side stays calm: activity counts appear only when non-zero, so an
+	// idle queue shows just the session count and the help pointer. Failures get
+	// their own red chip.
 	var right []statusSegment
 	if failed > 0 {
 		right = append(right, statusSegment{text: fmt.Sprintf(" fail %d ", failed), style: airlineError})
 	}
+	var counts []string
+	if running > 0 {
+		counts = append(counts, fmt.Sprintf("run %d", running))
+	}
+	if queued > 0 {
+		counts = append(counts, fmt.Sprintf("queue %d", queued))
+	}
+	if finished > 0 {
+		counts = append(counts, fmt.Sprintf("done %d", finished))
+	}
+	counts = append(counts, fmt.Sprintf("sess %d", sessions))
 	right = append(right,
-		statusSegment{text: fmt.Sprintf(" run %d · queue %d · done %d · sess %d ", running, queued, finished, sessions), style: airlineMuted},
+		statusSegment{text: " " + strings.Join(counts, " · ") + " ", style: airlineMuted},
 		statusSegment{text: " ? help ", style: airlineFocus},
 	)
 	return renderAirline(w, left, right)
-}
-
-func sortArrow(rev bool) string {
-	if rev {
-		return "▼"
-	}
-	return "▲"
 }
 
 // joinExact pads/truncates to exactly h lines of width w and joins them.
