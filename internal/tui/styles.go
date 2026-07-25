@@ -66,6 +66,9 @@ var (
 	// time — so the *foreground* here is the block color the user sees.
 	inputCursorStyle    = lipgloss.NewStyle().Foreground(cFgBright).Background(cInk)
 	cursorInactiveStyle = lipgloss.NewStyle().Foreground(cInactFg).Background(cInactBg)
+	// treeCursorDimStyle marks the sidebar's cursor row while the list (not the
+	// tree) has focus, so its position stays visible without competing.
+	treeCursorDimStyle  = lipgloss.NewStyle().Background(cInactBg)
 	selectedStyle       = lipgloss.NewStyle().Foreground(cInk).Background(cSelectBg)
 	cursorSelectedStyle = lipgloss.NewStyle().Foreground(cInk).Background(cSelectBg)
 	runningStyle        = lipgloss.NewStyle().Bold(true).Foreground(cGreen)

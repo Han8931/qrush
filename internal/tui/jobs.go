@@ -133,6 +133,7 @@ type jobsView struct {
 	settings configForm
 	picker   sessionPicker
 	pager    pagerState
+	tree     treePane // NerdTree-style foldable group/session sidebar
 }
 
 type jobsGTimeoutMsg struct{ id int }
@@ -145,7 +146,12 @@ type jobsGTimeoutMsg struct{ id int }
 func (m model) openJobsView() (model, tea.Cmd) {
 	m.viewMode = viewJobs
 	// Preserve the collapse state across re-entry, but reset transient sub-state.
-	m.jobs = jobsView{scopeAll: m.jobs.scopeAll, filter: m.jobs.filter}
+	// The tree sidebar's visibility and fold state survive too.
+	m.jobs = jobsView{
+		scopeAll: m.jobs.scopeAll,
+		filter:   m.jobs.filter,
+		tree:     treePane{show: m.jobs.tree.show, collapsed: m.jobs.tree.collapsed},
+	}
 	m.jobs.allJobs = m.collectJobs()
 	m.refreshJobsRows()
 	m.mouseOn = true
@@ -275,6 +281,7 @@ func (m *model) refreshJobsRows() {
 	if m.jobs.anchor < 0 {
 		m.jobs.anchor = 0
 	}
+	m.refreshTreeRows()
 }
 
 // anchorMgmtCursor keeps the cursor on the row with the same key across
@@ -494,6 +501,12 @@ func (m model) handleJobsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.jobs.filter = m.textInput.Value()
 		m.refreshJobsRows()
 		return m, cmd
+	}
+
+	// Tree sidebar: `T` toggles it, `tab` moves focus; while it has focus it
+	// owns navigation and fold keys (else the list handler below runs).
+	if nm, cmd, done := m.handleTreeKey(msg); done {
+		return nm, cmd
 	}
 
 	key := msg.String()

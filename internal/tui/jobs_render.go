@@ -168,28 +168,57 @@ func (m model) renderJobsView(w, h int) string {
 		return strings.Repeat("\n", max(0, h-1))
 	}
 	inner := w - 2
-	cols := computeJobColumns(inner)
 	bodyH := m.jobsBodyHeight()
 	lines := make([]string, 0, h)
 
-	lines = append(lines, boxedTop(w, "", focusBorderStyle))
-	lines = append(lines, m.jobsBordered(jobsHeaderStyle.Render(fitToWidth(m.jobsHeaderRow(cols), inner)), inner))
-
-	// Overlays (help / edit form / session picker) take the whole box, so the
-	// detail pane is replaced by extra room for a taller centered box.
+	// Overlays (help / edit form / session picker) take the whole box; the tree
+	// sidebar only shares space with the plain list, and only if there's room.
 	overlay := m.jobs.helping || m.jobs.form.active || m.jobs.settings.active || m.jobs.picker.active
+	showTree := m.jobs.tree.show && !overlay && inner >= 46
+
+	listInner := inner
+	if showTree {
+		listInner = inner - treePaneWidth - 1
+	}
+	cols := computeJobColumns(listInner)
+
+	// A row is [tree cell][divider][list line] when the sidebar is shown.
+	treeLines := []string(nil)
+	treeIdx := 0
+	if showTree {
+		treeLines = m.treePaneLines(bodyH + jobsDetailHeight)
+	}
+	withTree := func(right string) string {
+		if !showTree {
+			return right
+		}
+		cell := strings.Repeat(" ", treePaneWidth)
+		if treeIdx < len(treeLines) {
+			cell = treeLines[treeIdx]
+		}
+		treeIdx++
+		return cell + treeDividerCell() + right
+	}
+
+	lines = append(lines, boxedTop(w, "", focusBorderStyle))
+	header := jobsHeaderStyle.Render(fitToWidth(m.jobsHeaderRow(cols), listInner))
+	if showTree {
+		header = m.treeHeaderCell() + treeDividerCell() + header
+	}
+	lines = append(lines, m.jobsBordered(header, inner))
+
 	regionH := bodyH
 	if overlay {
 		regionH = bodyH + jobsDetailHeight
 	}
-	body := m.mgmtBodyLines(regionH, inner, cols)
+	body := m.mgmtBodyLines(regionH, listInner, cols)
 	for _, bl := range body {
-		lines = append(lines, m.jobsBordered(bl, inner))
+		lines = append(lines, m.jobsBordered(withTree(bl), inner))
 	}
 
 	if !overlay {
-		for _, dl := range m.jobsDetailLines(jobsDetailHeight, inner) {
-			lines = append(lines, m.jobsBordered(dl, inner))
+		for _, dl := range m.jobsDetailLines(jobsDetailHeight, listInner) {
+			lines = append(lines, m.jobsBordered(withTree(dl), inner))
 		}
 	}
 
@@ -370,6 +399,8 @@ func (m model) helpLines(bodyH, inner int) []string {
 		row("⏎", "job output (session if empty)"),
 		row("o", "open the output pager"),
 		row("S", "session picker: open/new/edit, d deletes"),
+		row("T / tab", "toggle session tree · focus tree ⇄ list"),
+		row("  in tree", "l/o/␣ fold · h collapse · ⏎ open · e/n/d"),
 		row("e", "edit row: name/session/group"),
 		row("n / a", "new session"),
 		row("x / u / r", "kill / urgent / rerun job"),
