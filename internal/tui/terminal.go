@@ -524,6 +524,12 @@ func renderTermCells(vt vt10x.Terminal, cols, rows int, showCursor bool) [][]str
 		row := make([]string, cols)
 		for x := 0; x < cols; x++ {
 			g := vt.Cell(x, y)
+			// The trailing half of a double-width glyph renders as nothing: the
+			// leading cell's wide rune already covers this terminal column.
+			if g.WideDummy() {
+				row[x] = ""
+				continue
+			}
 			ch := g.Char
 			if ch == 0 {
 				ch = ' '
