@@ -485,11 +485,13 @@ func foldMark(collapsed, hasKids bool) string {
 	return "▾"
 }
 
-// treeHeaderCell renders the sidebar's column header, brightened when focused.
+// treeHeaderCell renders the sidebar's column header in the same style as the
+// job table header, so the whole top row reads as one unit: accent cyan when
+// the tree is focused, muted-but-legible otherwise.
 func (m model) treeHeaderCell(width int) string {
-	s := treeSummaryStyle
-	if m.jobs.tree.focus {
-		s = modalActiveStyle
+	s := jobsHeaderStyle
+	if !m.jobs.tree.focus {
+		s = jobsHeaderStyle.Foreground(cFgMuted)
 	}
 	return s.Render(fitToWidth(" SESSIONS", width))
 }

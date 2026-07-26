@@ -147,7 +147,8 @@ func (m model) jobsHeaderRow(c columnWidths) string {
 		}
 		return title
 	}
-	row := fmt.Sprintf("%*s", c.id, mark("ID", m.jobs.sortMode == sortByID)) + "   " +
+	// Plain text; the caller block-highlights the whole row with jobsHeaderStyle.
+	return fmt.Sprintf("%*s", c.id, mark("ID", m.jobs.sortMode == sortByID)) + "   " +
 		fitToWidth(mark("GROUP", m.jobs.sortMode == sortGrouped), c.group) + " " +
 		fitToWidth("SESSION", c.session) + " " +
 		fitToWidth(mark("STATE", m.jobs.sortMode == sortByState), c.state) + " " +
@@ -155,7 +156,6 @@ func (m model) jobsHeaderRow(c columnWidths) string {
 		fitToWidth("TIMEOUT", c.timeout) + " " +
 		fitToWidth("NAME", c.name) + " " +
 		fitToWidth("COMMAND", c.command)
-	return treeSummaryStyle.Render(row)
 }
 
 // --- rendering ------------------------------------------------------------
