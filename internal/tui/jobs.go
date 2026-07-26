@@ -114,7 +114,7 @@ type jobsView struct {
 	sortMode sortMode
 	sortRev  bool // reverse the current sort
 
-	pending      byte // first key of a two-key motion: 'g' (gg) or 'd' (dd)
+	pending      byte // first key of a two-key motion: 'g' (gg), 's' (sort) or ',' (leader)
 	pendingTimer int
 
 	confirm  confirmState
@@ -473,13 +473,53 @@ func (m model) handleJobsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
-	// Tree sidebar: `T` toggles it, `tab` moves focus; while it has focus it
-	// owns navigation and fold keys (else the list handler below runs).
+	key := msg.String()
+
+	// Ctrl+W chord: vim-style focus movement between the tree sidebar (left) and
+	// the job list (right), mirroring the split-view pane nav. `tab` also toggles.
+	if m.ctrlWPressed {
+		m.ctrlWPressed = false
+		switch key {
+		case "h", "left", "ctrl+h", "backspace":
+			if m.jobs.tree.show {
+				m.jobs.tree.focus = true
+			}
+			return m, nil
+		case "l", "right", "ctrl+l":
+			m.jobs.tree.focus = false
+			return m, nil
+		case "w", "ctrl+w":
+			if m.jobs.tree.show {
+				m.jobs.tree.focus = !m.jobs.tree.focus
+			}
+			return m, nil
+		}
+		// unrecognized chord key: fall through and process it normally
+	}
+	if msg.Type == tea.KeyCtrlW {
+		m.ctrlWPressed = true
+		m.ctrlWTimer++
+		id := m.ctrlWTimer
+		return m, tea.Tick(300*time.Millisecond, func(time.Time) tea.Msg { return ctrlWTimeoutMsg{id: id} })
+	}
+
+	// `,` leader chord. Handled before the tree so it works from anywhere,
+	// including while the tree has focus. `,n` toggles the sidebar.
+	if m.jobs.pending == ',' {
+		m.jobs.pending = 0
+		if key == "n" {
+			return m.toggleTree()
+		}
+		// unknown leader key: fall through and process it normally
+	} else if key == "," {
+		return m.startPending(',')
+	}
+
+	// Tree sidebar: `tab` moves focus; while it has focus it owns navigation
+	// and fold keys (else the list handler below runs).
 	if nm, cmd, done := m.handleTreeKey(msg); done {
 		return nm, cmd
 	}
-
-	key := msg.String()
 
 	// Complete a pending two-key motion (gg jumps to top; sg/si/ss/st sort).
 	if m.jobs.pending != 0 {

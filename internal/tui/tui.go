@@ -338,7 +338,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ctrlWTimeoutMsg:
 		if msg.id == m.ctrlWTimer && m.ctrlWPressed {
 			m.ctrlWPressed = false
-			if m.focus == paneTerm && m.shell != nil {
+			// In the MANAGE view the chord only moves tree/list focus; there is no
+			// shell to receive a stray Ctrl+W, so only forward it in the split view.
+			if m.viewMode == viewSplit && m.focus == paneTerm && m.shell != nil {
 				m.shell.write([]byte{0x17})
 			}
 		}
@@ -406,18 +408,20 @@ func (m model) handleCtrlW(msg tea.KeyMsg) (model, bool, tea.Cmd) {
 
 	if m.ctrlWPressed {
 		m.ctrlWPressed = false
+		// Accept both the release-Ctrl form (<C-w>h) and the hold-Ctrl form
+		// (<C-w><C-h>) that many vim users type without letting go of Ctrl.
 		switch key {
-		case "h", "left":
+		case "h", "left", "ctrl+h", "backspace":
 			return m.ctrlWLeft(), true, nil
-		case "l", "right":
+		case "l", "right", "ctrl+l":
 			return m.ctrlWRight(), true, nil
-		case "k", "up":
+		case "k", "up", "ctrl+k":
 			return m.ctrlWVert(false), true, nil
-		case "j", "down":
+		case "j", "down", "ctrl+j":
 			return m.ctrlWVert(true), true, nil
-		case "w":
+		case "w", "ctrl+w":
 			return m.ctrlWCycle(), true, nil
-		case "q":
+		case "q", "ctrl+q":
 			nm, cmd := m.closeFocused()
 			return nm, true, cmd
 		}

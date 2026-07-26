@@ -18,9 +18,36 @@ import (
 type treePane struct {
 	show      bool
 	focus     bool // keys drive the tree instead of the list
+	zoom      bool // NerdTree-style `A`: expand the pane to fill the whole box
 	cursor    int
 	rows      []treeRow       // derived visible rows (honors fold state)
 	collapsed map[string]bool // node key → folded; survives the live refresh
+	menu      treeMenu        // NerdTree-style `m` action menu (when active)
+}
+
+// treeMenu is the NerdTree-style pop-up of context actions for the node under
+// the cursor, opened with `m`. It captures its target row so the actions stay
+// bound to it even though the cursor can't move while the menu is open.
+type treeMenu struct {
+	active bool
+	row    treeRow
+	items  []treeMenuItem
+	cursor int
+}
+
+type treeMenuAct int
+
+const (
+	menuOpen   treeMenuAct = iota // fold group / open session / page job
+	menuAdd                       // add a session (to this group)
+	menuRename                    // rename the group or session
+	menuDelete                    // delete the group or session
+)
+
+type treeMenuItem struct {
+	key   string // single-key shortcut, shown as "(k)"
+	label string
+	act   treeMenuAct
 }
 
 type treeRowKind int
@@ -96,20 +123,25 @@ func (t *treePane) current() (treeRow, bool) {
 
 // --- key handling ---------------------------------------------------------
 
-// handleTreeKey processes sidebar keys. `T` toggles the pane from anywhere and
-// `tab` moves focus between the tree and the list; while the tree has focus it
-// owns navigation and fold keys. The bool reports whether the key was consumed
-// (false lets the list handler run).
+// toggleTree shows/hides the sidebar. Hiding it also drops its focus so the
+// list regains navigation. Bound to the `,n` leader chord in handleJobsKey.
+func (m model) toggleTree() (tea.Model, tea.Cmd) {
+	m.jobs.tree.show = !m.jobs.tree.show
+	if m.jobs.tree.show {
+		(&m).refreshTreeRows()
+	} else {
+		m.jobs.tree.focus = false
+		m.jobs.tree.zoom = false
+		m.jobs.tree.menu = treeMenu{}
+	}
+	return m, nil
+}
+
+// handleTreeKey processes sidebar keys. `tab` moves focus between the tree and
+// the list; while the tree has focus it owns navigation and fold keys. The bool
+// reports whether the key was consumed (false lets the list handler run).
 func (m model) handleTreeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 	switch msg.String() {
-	case "T":
-		m.jobs.tree.show = !m.jobs.tree.show
-		if m.jobs.tree.show {
-			(&m).refreshTreeRows()
-		} else {
-			m.jobs.tree.focus = false
-		}
-		return m, nil, true
 	case "tab":
 		if m.jobs.tree.show {
 			m.jobs.tree.focus = !m.jobs.tree.focus
@@ -122,9 +154,18 @@ func (m model) handleTreeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 		return m, nil, false
 	}
 
+	// The action menu, when open, owns every key until it closes.
+	if m.jobs.tree.menu.active {
+		return m.handleTreeMenuKey(msg)
+	}
+
 	t := &m.jobs.tree
 	switch msg.String() {
 	case "esc":
+		if t.zoom {
+			t.zoom = false
+			return m, nil, true
+		}
 		t.focus = false
 	case "j", "down":
 		if t.cursor < len(t.rows)-1 {
@@ -144,6 +185,12 @@ func (m model) handleTreeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 		(&m).treeToggleFold()
 	case "h":
 		(&m).treeCollapseOrParent()
+	case "A":
+		// NerdTree-style zoom: expand the pane to fill the whole box.
+		t.zoom = !t.zoom
+	case "m":
+		// NerdTree-style action menu for the node under the cursor.
+		return m.openTreeMenu()
 	case "enter":
 		return m.treeActivate()
 	case "e":
@@ -155,6 +202,92 @@ func (m model) handleTreeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 		}
 		return m.openSessionForm(true, "", grp), textinput.Blink, true
 	case "d":
+		(&m).treeDelete()
+	}
+	return m, nil, true
+}
+
+// openTreeMenu builds the NerdTree-style action menu for the node under the
+// cursor. The offered actions depend on whether it's a group, session, or job.
+func (m model) openTreeMenu() (tea.Model, tea.Cmd, bool) {
+	r, ok := m.jobs.tree.current()
+	if !ok {
+		return m, nil, true
+	}
+	var items []treeMenuItem
+	switch r.kind {
+	case treeGroup:
+		items = []treeMenuItem{
+			{"a", "add session", menuAdd},
+			{"r", "rename group", menuRename},
+			{"d", "delete group", menuDelete},
+		}
+	case treeSession:
+		items = []treeMenuItem{
+			{"o", "open session", menuOpen},
+			{"a", "add session", menuAdd},
+			{"r", "rename session", menuRename},
+			{"d", "delete session", menuDelete},
+		}
+	case treeJob:
+		items = []treeMenuItem{
+			{"o", "open output", menuOpen},
+			{"a", "add session", menuAdd},
+		}
+	}
+	m.jobs.tree.menu = treeMenu{active: true, row: r, items: items}
+	return m, nil, true
+}
+
+// handleTreeMenuKey drives the open action menu: j/k move, enter or a shortcut
+// runs an item, esc/q/m closes it.
+func (m model) handleTreeMenuKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
+	menu := &m.jobs.tree.menu
+	switch msg.String() {
+	case "esc", "q", "m":
+		menu.active = false
+		return m, nil, true
+	case "j", "down":
+		if menu.cursor < len(menu.items)-1 {
+			menu.cursor++
+		}
+		return m, nil, true
+	case "k", "up":
+		if menu.cursor > 0 {
+			menu.cursor--
+		}
+		return m, nil, true
+	case "enter":
+		if menu.cursor < len(menu.items) {
+			return m.runTreeMenu(menu.items[menu.cursor].act)
+		}
+		return m, nil, true
+	}
+	for _, it := range menu.items {
+		if msg.String() == it.key {
+			return m.runTreeMenu(it.act)
+		}
+	}
+	return m, nil, true
+}
+
+// runTreeMenu closes the menu and dispatches the chosen action. The menu opened
+// on the current row and the cursor can't move while it's up, so the existing
+// current()-based helpers act on the right node.
+func (m model) runTreeMenu(act treeMenuAct) (tea.Model, tea.Cmd, bool) {
+	m.jobs.tree.menu.active = false
+	switch act {
+	case menuOpen:
+		return m.treeActivate()
+	case menuAdd:
+		grp := ""
+		if r, ok := m.jobs.tree.current(); ok {
+			grp = r.group
+		}
+		return m.openSessionForm(true, "", grp), textinput.Blink, true
+	case menuRename:
+		return m.treeEdit()
+	case menuDelete:
 		(&m).treeDelete()
 	}
 	return m, nil, true
@@ -253,9 +386,10 @@ func (m *model) treeDelete() {
 
 // --- rendering ------------------------------------------------------------
 
-// treePaneLines renders the sidebar column as exactly h lines, treePaneWidth
-// wide, scrolled to keep the cursor visible.
-func (m model) treePaneLines(h int) []string {
+// treePaneLines renders the sidebar column as exactly h lines, width columns
+// wide, scrolled to keep the cursor visible. The width varies: the fixed
+// sidebar width normally, or the whole box when zoomed (`A`).
+func (m model) treePaneLines(h, width int) []string {
 	t := m.jobs.tree
 	off := 0
 	if t.cursor >= h {
@@ -265,15 +399,15 @@ func (m model) treePaneLines(h int) []string {
 	for i := 0; i < h; i++ {
 		idx := off + i
 		if idx >= len(t.rows) {
-			out = append(out, strings.Repeat(" ", treePaneWidth))
+			out = append(out, strings.Repeat(" ", width))
 			continue
 		}
-		out = append(out, m.renderTreeRow(t.rows[idx], idx == t.cursor))
+		out = append(out, m.renderTreeRow(t.rows[idx], idx == t.cursor, width))
 	}
 	return out
 }
 
-func (m model) renderTreeRow(r treeRow, selected bool) string {
+func (m model) renderTreeRow(r treeRow, selected bool, width int) string {
 	var text string
 	style := treeSummaryStyle
 	switch r.kind {
@@ -290,7 +424,7 @@ func (m model) renderTreeRow(r treeRow, selected bool) string {
 		}
 		text = fmt.Sprintf("    #%d %s", r.job.ID, label)
 	}
-	txt := fitToWidth(stripAnsi(" "+text), treePaneWidth)
+	txt := fitToWidth(stripAnsi(" "+text), width)
 	if selected && m.jobs.tree.focus {
 		return lipgloss.NewStyle().Background(cRowFocusBg).Render(txt)
 	}
@@ -299,6 +433,44 @@ func (m model) renderTreeRow(r treeRow, selected bool) string {
 		return treeCursorDimStyle.Render(txt)
 	}
 	return style.Render(txt)
+}
+
+// treeMenuLines renders the NerdTree-style action menu as a centered box,
+// listing each action with its shortcut and highlighting the cursor row.
+func (m model) treeMenuLines(bodyH, inner int) []string {
+	menu := m.jobs.tree.menu
+	boxInner := modalInnerWidth(inner, 34)
+	content := []string{
+		treeSummaryStyle.Render(fitToWidth(" "+treeMenuTarget(menu.row), boxInner)),
+		"",
+	}
+	for i, it := range menu.items {
+		line := fmt.Sprintf(" (%s) %s", it.key, it.label)
+		if i == menu.cursor {
+			content = append(content, modalActiveStyle.Render(fitToWidth("›"+line, boxInner)))
+		} else {
+			content = append(content, treeSummaryStyle.Render(fitToWidth(" "+line, boxInner)))
+		}
+	}
+	content = append(content, "", treeEmptyStyle.Render(fitToWidth("  j/k move · ⏎ run · esc close", boxInner)))
+	return centerBox(modalBox("Menu", content, boxInner), bodyH, inner)
+}
+
+// treeMenuTarget names the node an open menu acts on, for its heading.
+func treeMenuTarget(r treeRow) string {
+	switch r.kind {
+	case treeGroup:
+		return "group " + r.group
+	case treeSession:
+		return "session " + r.session
+	case treeJob:
+		label := r.job.Label
+		if label == "" {
+			label = r.job.Command
+		}
+		return fmt.Sprintf("job #%d %s", r.job.ID, label)
+	}
+	return ""
 }
 
 // foldMark returns the disclosure triangle for a node (blank when it has no
@@ -314,12 +486,12 @@ func foldMark(collapsed, hasKids bool) string {
 }
 
 // treeHeaderCell renders the sidebar's column header, brightened when focused.
-func (m model) treeHeaderCell() string {
+func (m model) treeHeaderCell(width int) string {
 	s := treeSummaryStyle
 	if m.jobs.tree.focus {
 		s = modalActiveStyle
 	}
-	return s.Render(fitToWidth(" SESSIONS", treePaneWidth))
+	return s.Render(fitToWidth(" SESSIONS", width))
 }
 
 func treeDividerCell() string { return borderStyle.Render("│") }

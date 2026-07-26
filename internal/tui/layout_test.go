@@ -1,9 +1,54 @@
 package tui
 
-import "testing"
+import (
+	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
+)
 
 func leafWithID(id int) *paneNode {
 	return newLeaf(&shellState{id: id})
+}
+
+// Drive the real key dispatch (Update): Ctrl+W then l/h must move pane focus.
+func TestCtrlWChordThroughUpdate(t *testing.T) {
+	root := leafWithID(1)
+	right := root.split(root, &shellState{id: 2}, splitVert)
+	leftLeaf := root.leaves()[0]
+
+	newModel := func() model {
+		return model{
+			width:         80,
+			height:        24,
+			focus:         paneTerm,
+			activeSession: "default",
+			layouts:       map[string]*paneNode{"default": root},
+			panes:         map[int]*shellState{1: leftLeaf.shell, 2: right.shell},
+			focusPane:     leftLeaf,
+			shell:         leftLeaf.shell,
+		}
+	}
+
+	// Release-Ctrl form: Ctrl+W, then plain "l".
+	m := newModel()
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlW})
+	m = nm.(model)
+	if !m.ctrlWPressed {
+		t.Fatal("Ctrl+W should arm the pane-nav prefix")
+	}
+	nm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	if nm.(model).focusPane != right {
+		t.Fatal("Ctrl+W then l should focus the right pane")
+	}
+
+	// Hold-Ctrl form: Ctrl+W, then Ctrl+L.
+	m = newModel()
+	nm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlW})
+	m = nm.(model)
+	nm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlL})
+	if nm.(model).focusPane != right {
+		t.Fatal("Ctrl+W then Ctrl+L should focus the right pane")
+	}
 }
 
 func TestSingleLeafLayout(t *testing.T) {

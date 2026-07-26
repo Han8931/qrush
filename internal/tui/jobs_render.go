@@ -173,12 +173,22 @@ func (m model) renderJobsView(w, h int) string {
 
 	// Overlays (help / edit form / session picker) take the whole box; the tree
 	// sidebar only shares space with the plain list, and only if there's room.
-	overlay := m.jobs.helping || m.jobs.form.active || m.jobs.settings.active || m.jobs.picker.active
+	overlay := m.jobs.helping || m.jobs.form.active || m.jobs.settings.active ||
+		m.jobs.picker.active || m.jobs.tree.menu.active
 	showTree := m.jobs.tree.show && !overlay && inner >= 46
+	// NerdTree-style zoom (`A`): the tree fills the box; the list is hidden. The
+	// divider still costs a column so the tree cell width is inner-1.
+	zoom := showTree && m.jobs.tree.zoom
 
+	treeW := treePaneWidth
 	listInner := inner
 	if showTree {
-		listInner = inner - treePaneWidth - 1
+		if zoom {
+			treeW = inner - 1
+			listInner = 0
+		} else {
+			listInner = inner - treePaneWidth - 1
+		}
 	}
 	cols := computeJobColumns(listInner)
 
@@ -186,24 +196,29 @@ func (m model) renderJobsView(w, h int) string {
 	treeLines := []string(nil)
 	treeIdx := 0
 	if showTree {
-		treeLines = m.treePaneLines(bodyH + jobsDetailHeight)
+		treeLines = m.treePaneLines(bodyH+jobsDetailHeight, treeW)
 	}
 	withTree := func(right string) string {
 		if !showTree {
 			return right
 		}
-		cell := strings.Repeat(" ", treePaneWidth)
+		cell := strings.Repeat(" ", treeW)
 		if treeIdx < len(treeLines) {
 			cell = treeLines[treeIdx]
 		}
 		treeIdx++
+		if zoom {
+			return cell + treeDividerCell()
+		}
 		return cell + treeDividerCell() + right
 	}
 
 	lines = append(lines, boxedTop(w, "", focusBorderStyle))
 	header := jobsHeaderStyle.Render(fitToWidth(m.jobsHeaderRow(cols), listInner))
-	if showTree {
-		header = m.treeHeaderCell() + treeDividerCell() + header
+	if zoom {
+		header = m.treeHeaderCell(treeW) + treeDividerCell()
+	} else if showTree {
+		header = m.treeHeaderCell(treeW) + treeDividerCell() + header
 	}
 	lines = append(lines, m.jobsBordered(header, inner))
 
@@ -249,6 +264,9 @@ func (m model) mgmtBodyLines(bodyH, inner int, cols columnWidths) []string {
 	}
 	if m.jobs.helping {
 		return m.helpLines(bodyH, inner)
+	}
+	if m.jobs.tree.menu.active {
+		return m.treeMenuLines(bodyH, inner)
 	}
 	out := make([]string, 0, bodyH)
 	if len(m.jobs.rows) == 0 {
@@ -367,8 +385,10 @@ func (m model) helpLines(bodyH, inner int) []string {
 		row("⏎", "job output (session if empty)"),
 		row("o", "open the output pager"),
 		row("S", "session picker: open/new/edit, d deletes"),
-		row("T / tab", "toggle session tree · focus tree ⇄ list"),
+		row(",n / tab", "toggle session tree · focus tree ⇄ list"),
+		row("^w h/l", "focus tree (left) / list (right)"),
 		row("  in tree", "l/o/␣ fold · h collapse · ⏎ open · e/n/d"),
+		row("  m / A", "action menu · zoom the tree full-width"),
 		row("e", "edit row: name/session/group"),
 		row("n / a", "new session"),
 		row("x / u / r", "kill / urgent / rerun job"),
