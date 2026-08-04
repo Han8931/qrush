@@ -72,10 +72,16 @@ func TestTreeToggleAndFocus(t *testing.T) {
 	m = nm.(model)
 	nm, _ = m.handleJobsKey(keyRune('n'))
 	m = nm.(model)
-	if !m.jobs.tree.show {
-		t.Fatalf(",n should show the tree")
+	if !m.jobs.tree.show || !m.jobs.tree.focus {
+		t.Fatalf(",n should show the tree and focus it")
 	}
+	// tab hands focus back to the list, and again to the tree.
 	nm, _, done := m.handleTreeKey(keyNamed("tab"))
+	m = nm.(model)
+	if !done || m.jobs.tree.focus {
+		t.Fatalf("tab should move focus off the tree")
+	}
+	nm, _, done = m.handleTreeKey(keyNamed("tab"))
 	m = nm.(model)
 	if !done || !m.jobs.tree.focus {
 		t.Fatalf("tab should focus the shown tree")

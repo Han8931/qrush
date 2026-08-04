@@ -123,12 +123,14 @@ func (t *treePane) current() (treeRow, bool) {
 
 // --- key handling ---------------------------------------------------------
 
-// toggleTree shows/hides the sidebar. Hiding it also drops its focus so the
-// list regains navigation. Bound to the `,n` leader chord in handleJobsKey.
+// toggleTree shows/hides the sidebar. Showing it also focuses it — opening the
+// tree means you want to drive it. Hiding it drops that focus so the list
+// regains navigation. Bound to the `,n` leader chord in handleJobsKey.
 func (m model) toggleTree() (tea.Model, tea.Cmd) {
 	m.jobs.tree.show = !m.jobs.tree.show
 	if m.jobs.tree.show {
 		(&m).refreshTreeRows()
+		m.jobs.tree.focus = true
 	} else {
 		m.jobs.tree.focus = false
 		m.jobs.tree.zoom = false
