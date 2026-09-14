@@ -302,3 +302,52 @@ func rerunJobs(ids []int) tea.Cmd {
 	}
 	return tea.Batch(cmds...)
 }
+
+func killJob(id int) tea.Cmd {
+	return func() tea.Msg {
+		err := client.KillJob(id)
+		if err != nil {
+			return actionDoneMsg{err: err}
+		}
+		return actionDoneMsg{status: fmt.Sprintf("killed job %d", id)}
+	}
+}
+
+func clearFinishedCmd() tea.Cmd {
+	return func() tea.Msg {
+		if err := client.ClearFinished(); err != nil {
+			return actionDoneMsg{err: err}
+		}
+		return actionDoneMsg{status: "cleared finished jobs"}
+	}
+}
+
+func removeJob(id int) tea.Cmd {
+	return func() tea.Msg {
+		err := client.RemoveJob(id)
+		if err != nil {
+			return actionDoneMsg{err: err}
+		}
+		return actionDoneMsg{status: fmt.Sprintf("removed job %d", id)}
+	}
+}
+
+func rerunJob(id int) tea.Cmd {
+	return func() tea.Msg {
+		newID, err := client.Rerun(id)
+		if err != nil {
+			return actionDoneMsg{err: err}
+		}
+		return actionDoneMsg{status: fmt.Sprintf("reran job %d as %d", id, newID)}
+	}
+}
+
+func makeUrgent(id int) tea.Cmd {
+	return func() tea.Msg {
+		err := client.MakeUrgent(id)
+		if err != nil {
+			return actionDoneMsg{err: err}
+		}
+		return actionDoneMsg{status: fmt.Sprintf("job %d moved to front", id)}
+	}
+}

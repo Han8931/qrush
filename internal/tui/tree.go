@@ -150,32 +150,3 @@ func jobCounts(jobs []protocol.JobInfo) (running, queued, finished int) {
 	}
 	return
 }
-
-func padRight(s string, width int) string {
-	n := lipgloss.Width(s)
-	if n >= width {
-		return s
-	}
-	return s + strings.Repeat(" ", width-n)
-}
-
-func stripAnsi(s string) string {
-	var out strings.Builder
-	i := 0
-	for i < len(s) {
-		if s[i] == '\x1b' && i+1 < len(s) && s[i+1] == '[' {
-			j := i + 2
-			for j < len(s) && !((s[j] >= 'A' && s[j] <= 'Z') || (s[j] >= 'a' && s[j] <= 'z')) {
-				j++
-			}
-			if j < len(s) {
-				j++
-			}
-			i = j
-		} else {
-			out.WriteByte(s[i])
-			i++
-		}
-	}
-	return out.String()
-}

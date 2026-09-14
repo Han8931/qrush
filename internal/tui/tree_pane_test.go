@@ -62,7 +62,7 @@ func TestTreeRowsAndFold(t *testing.T) {
 	}
 }
 
-// `,n` toggles the sidebar; tab moves focus only when the sidebar is shown.
+// `,n` toggles the sidebar and focuses it; tab moves focus only when shown.
 func TestTreeToggleAndFocus(t *testing.T) {
 	m := model{viewMode: viewJobs}
 	m.nodes = buildTree([]string{"default"}, []protocol.SessionInfo{{Name: "default", Group: "default"}}, nil)
@@ -84,7 +84,7 @@ func TestTreeToggleAndFocus(t *testing.T) {
 	nm, _, done = m.handleTreeKey(keyNamed("tab"))
 	m = nm.(model)
 	if !done || !m.jobs.tree.focus {
-		t.Fatalf("tab should focus the shown tree")
+		t.Fatalf("tab should focus the shown tree again")
 	}
 	// Hiding clears focus — the leader chord works from anywhere, incl. tree focus.
 	nm, _ = m.handleJobsKey(keyRune(','))
@@ -97,6 +97,25 @@ func TestTreeToggleAndFocus(t *testing.T) {
 	// tab with the tree hidden is not consumed (list may use it).
 	if _, _, done := m.handleTreeKey(keyNamed("tab")); done {
 		t.Fatalf("tab should not be consumed while the tree is hidden")
+	}
+}
+
+// Re-entering the MANAGE view (detaching from a session) keeps the sidebar's
+// focus, so the cursor stays where it was left.
+func TestTreeFocusSurvivesReopen(t *testing.T) {
+	m := treeModel()
+	m.jobs.tree.focus = true
+
+	m, _ = m.openJobsView()
+	if !m.jobs.tree.focus {
+		t.Fatal("reopening the MANAGE view should keep tree focus")
+	}
+
+	// A hidden sidebar can never hold focus.
+	m.jobs.tree.show = false
+	m, _ = m.openJobsView()
+	if m.jobs.tree.focus {
+		t.Fatal("a hidden tree must not be focused")
 	}
 }
 

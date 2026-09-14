@@ -129,6 +129,7 @@ func (t *treePane) current() (treeRow, bool) {
 func (m model) toggleTree() (tea.Model, tea.Cmd) {
 	m.jobs.tree.show = !m.jobs.tree.show
 	if m.jobs.tree.show {
+		m.jobs.tree.focus = true
 		(&m).refreshTreeRows()
 		m.jobs.tree.focus = true
 	} else {
