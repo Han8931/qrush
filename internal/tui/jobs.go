@@ -132,11 +132,16 @@ type jobsGTimeoutMsg struct{ id int }
 func (m model) openJobsView() (model, tea.Cmd) {
 	m.viewMode = viewJobs
 	// Preserve the collapse state across re-entry, but reset transient sub-state.
-	// The tree sidebar's visibility and fold state survive too.
+	// The tree sidebar's visibility, fold state and focus survive too — coming
+	// back from a session should leave the sidebar exactly as it was left.
 	m.jobs = jobsView{
 		scopeAll: m.jobs.scopeAll,
 		filter:   m.jobs.filter,
-		tree:     treePane{show: m.jobs.tree.show, collapsed: m.jobs.tree.collapsed},
+		tree: treePane{
+			show:      m.jobs.tree.show,
+			focus:     m.jobs.tree.show && m.jobs.tree.focus,
+			collapsed: m.jobs.tree.collapsed,
+		},
 	}
 	m.jobs.allJobs = m.collectJobs()
 	m.refreshJobsRows()

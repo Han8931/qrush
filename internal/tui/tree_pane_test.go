@@ -100,6 +100,25 @@ func TestTreeToggleAndFocus(t *testing.T) {
 	}
 }
 
+// Re-entering the MANAGE view (detaching from a session) keeps the sidebar's
+// focus, so the cursor stays where it was left.
+func TestTreeFocusSurvivesReopen(t *testing.T) {
+	m := treeModel()
+	m.jobs.tree.focus = true
+
+	m, _ = m.openJobsView()
+	if !m.jobs.tree.focus {
+		t.Fatal("reopening the MANAGE view should keep tree focus")
+	}
+
+	// A hidden sidebar can never hold focus.
+	m.jobs.tree.show = false
+	m, _ = m.openJobsView()
+	if m.jobs.tree.focus {
+		t.Fatal("a hidden tree must not be focused")
+	}
+}
+
 // In the MANAGE view, Ctrl+W then h/l moves focus between the tree and the list.
 func TestTreeCtrlWFocus(t *testing.T) {
 	m := treeModel() // tree shown, list focused (tree.focus == false)
