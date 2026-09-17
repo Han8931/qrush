@@ -6,7 +6,6 @@ import (
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 
 	"github.com/han/qrush/internal/protocol"
 )
@@ -429,7 +428,7 @@ func (m model) renderTreeRow(r treeRow, selected bool, width int) string {
 	}
 	txt := fitToWidth(stripAnsi(" "+text), width)
 	if selected && m.jobs.tree.focus {
-		return lipgloss.NewStyle().Background(cRowFocusBg).Render(txt)
+		return style.Background(cRowFocusBg).Render(txt)
 	}
 	if selected {
 		// Unfocused cursor: a subtle marker so position is still visible.

@@ -92,14 +92,14 @@ func renderJobsRow(j protocol.JobInfo, group string, c columnWidths, bg lipgloss
 	grp := cell(group, c.group, groupStyle)
 	sess := cell(displaySession(j.Session), c.session, sessionStyle)
 	state := cell(stateTxt, c.state, stateStyle)
-	tm := cell(timeStr, c.tm, lipgloss.NewStyle())
+	tm := cell(timeStr, c.tm, lipgloss.NewStyle().Foreground(cFg))
 	timeoutTxt, timeoutStyle := "-", treeEmptyStyle
 	if j.TimeoutMS > 0 {
 		timeoutTxt, timeoutStyle = durationCompact(time.Duration(j.TimeoutMS)*time.Millisecond), queuedStyle
 	}
 	timeout := cell(timeoutTxt, c.timeout, timeoutStyle)
 	name := cell(nameTxt, c.name, nameStyle)
-	command := cell(j.Command, c.command, lipgloss.NewStyle())
+	command := cell(j.Command, c.command, lipgloss.NewStyle().Foreground(cFg))
 	return id + sep + sep + sep + grp + sep + sess + sep + state + sep + tm + sep + timeout + sep + name + sep + command
 }
 
@@ -213,7 +213,7 @@ func (m model) renderJobsView(w, h int) string {
 		return cell + treeDividerCell() + right
 	}
 
-	lines = append(lines, boxedTop(w, "", focusBorderStyle))
+	lines = append(lines, boxedTop(w, "", borderStyle))
 	header := jobsHeaderStyle.Render(fitToWidth(m.jobsHeaderRow(cols), listInner))
 	if zoom {
 		header = m.treeHeaderCell(treeW) + treeDividerCell()
@@ -237,7 +237,7 @@ func (m model) renderJobsView(w, h int) string {
 		}
 	}
 
-	lines = append(lines, boxedBottom(w, focusBorderStyle))
+	lines = append(lines, boxedBottom(w, borderStyle))
 	if m.jobs.filtering {
 		lines = append(lines, fitToWidth(inputStyle.Render("/")+m.textInput.View(), w))
 	}
@@ -419,7 +419,7 @@ func (m model) helpLines(bodyH, inner int) []string {
 // job view: CPU, memory, load average, and core count.
 func (m model) renderHWBar(w int) string {
 	s := m.hwStats
-	left := []statusSegment{{text: " HW ", style: modeCommandStyle}}
+	left := []statusSegment{{text: " HW ", style: airlineMuted}}
 	if !s.CPUOK && !s.MemOK && !s.LoadOK {
 		left = append(left, statusSegment{text: " gathering… (or unavailable on this platform) ", style: airlineMuted})
 		return renderAirline(w, left, nil)
@@ -498,7 +498,7 @@ func humanBytes(b uint64) string {
 }
 
 func (m model) jobsBordered(content string, inner int) string {
-	b := focusBorderStyle.Render("│")
+	b := borderStyle.Render("│")
 	return b + fitToWidth(content, inner) + b
 }
 
