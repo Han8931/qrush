@@ -126,6 +126,75 @@ func RemoveJob(id int) error {
 	return nil
 }
 
+// BatchResult reports how a multi-job action fared: how many the daemon
+// accepted, and the first refusal (all refusals share a cause in practice —
+// "cannot remove job" for the running ones, say).
+type BatchResult struct {
+	OK      int
+	Failed  int
+	FirstID int   // the first id the daemon refused
+	Err     error // why it refused
+}
+
+// batchByID issues one request per id over a *single* connection. Fanning the
+// same work out over one connection each trips the daemon's max_conn cap (10
+// by default), which silently dropped most of a large selection.
+func batchByID(msgType protocol.MsgType, ids []int) (BatchResult, error) {
+	var res BatchResult
+	if len(ids) == 0 {
+		return res, nil
+	}
+	c, err := Connect()
+	if err != nil {
+		return res, err
+	}
+	defer c.Close()
+
+	for _, id := range ids {
+		if err := c.Send(&protocol.Msg{
+			Type:    msgType,
+			Payload: protocol.PayloadJobID{JobID: id},
+		}); err != nil {
+			return res, err
+		}
+		msg, err := c.Recv()
+		if err != nil {
+			return res, err
+		}
+		if msg.Type == protocol.MsgError {
+			res.Failed++
+			if res.Err == nil {
+				res.FirstID, res.Err = id, recvError(msg)
+			}
+			continue
+		}
+		res.OK++
+	}
+	return res, nil
+}
+
+// RemoveJobs removes every id over one connection. A per-job refusal (a
+// running job, say) is counted, not fatal; the error return is reserved for a
+// connection-level failure that aborted the batch.
+func RemoveJobs(ids []int) (BatchResult, error) {
+	return batchByID(protocol.MsgRemoveJob, ids)
+}
+
+// KillJobs kills every id over one connection.
+func KillJobs(ids []int) (BatchResult, error) {
+	return batchByID(protocol.MsgKillJob, ids)
+}
+
+// MakeUrgentJobs moves every id to the front of the queue over one connection.
+func MakeUrgentJobs(ids []int) (BatchResult, error) {
+	return batchByID(protocol.MsgUrgent, ids)
+}
+
+// RerunJobs re-enqueues every id over one connection.
+func RerunJobs(ids []int) (BatchResult, error) {
+	return batchByID(protocol.MsgRerun, ids)
+}
+
 // Rerun re-enqueues a copy of an existing job and returns the new job ID.
 func Rerun(id int) (int, error) {
 	c, err := Connect()

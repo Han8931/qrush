@@ -271,45 +271,51 @@ func showLogdirCmd() tea.Cmd {
 	}
 }
 
+// The multi-job actions run the whole selection over one daemon connection
+// rather than tea.Batch-ing one connection per job: that fan-out tripped the
+// daemon's max_conn cap (10 by default), so selecting more than a handful of
+// jobs silently dropped most of them. One connection also means one status
+// line for the batch instead of N racing ones where the last arrival wins.
+
 func killJobs(ids []int) tea.Cmd {
-	var cmds []tea.Cmd
-	for _, id := range ids {
-		cmds = append(cmds, killJob(id))
-	}
-	return tea.Batch(cmds...)
+	return batchJobCmd(ids, client.KillJobs, "killed")
 }
 
 func makeUrgentJobs(ids []int) tea.Cmd {
-	var cmds []tea.Cmd
-	for _, id := range ids {
-		cmds = append(cmds, makeUrgent(id))
-	}
-	return tea.Batch(cmds...)
+	return batchJobCmd(ids, client.MakeUrgentJobs, "moved to front")
 }
 
 func removeJobs(ids []int) tea.Cmd {
-	var cmds []tea.Cmd
-	for _, id := range ids {
-		cmds = append(cmds, removeJob(id))
-	}
-	return tea.Batch(cmds...)
+	return batchJobCmd(ids, client.RemoveJobs, "removed")
 }
 
 func rerunJobs(ids []int) tea.Cmd {
-	var cmds []tea.Cmd
-	for _, id := range ids {
-		cmds = append(cmds, rerunJob(id))
-	}
-	return tea.Batch(cmds...)
+	return batchJobCmd(ids, client.RerunJobs, "reran")
 }
 
-func killJob(id int) tea.Cmd {
+// batchJobCmd runs a multi-job action and reports it in one line. Partial
+// failures are surfaced rather than hidden: "removed 9 of 12 jobs (job 4:
+// cannot remove job)" tells the user which jobs stayed put and why.
+func batchJobCmd(ids []int, run func([]int) (client.BatchResult, error), verb string) tea.Cmd {
 	return func() tea.Msg {
-		err := client.KillJob(id)
+		if len(ids) == 0 {
+			return actionDoneMsg{}
+		}
+		res, err := run(ids)
 		if err != nil {
 			return actionDoneMsg{err: err}
 		}
-		return actionDoneMsg{status: fmt.Sprintf("killed job %d", id)}
+		switch {
+		case res.Failed == 0 && len(ids) == 1:
+			return actionDoneMsg{status: fmt.Sprintf("%s job %d", verb, ids[0])}
+		case res.Failed == 0:
+			return actionDoneMsg{status: fmt.Sprintf("%s %d jobs", verb, res.OK)}
+		case res.OK == 0:
+			return actionDoneMsg{err: fmt.Errorf("job %d: %w", res.FirstID, res.Err)}
+		default:
+			return actionDoneMsg{status: fmt.Sprintf("%s %d of %d jobs (job %d: %v)",
+				verb, res.OK, len(ids), res.FirstID, res.Err)}
+		}
 	}
 }
 
@@ -319,35 +325,5 @@ func clearFinishedCmd() tea.Cmd {
 			return actionDoneMsg{err: err}
 		}
 		return actionDoneMsg{status: "cleared finished jobs"}
-	}
-}
-
-func removeJob(id int) tea.Cmd {
-	return func() tea.Msg {
-		err := client.RemoveJob(id)
-		if err != nil {
-			return actionDoneMsg{err: err}
-		}
-		return actionDoneMsg{status: fmt.Sprintf("removed job %d", id)}
-	}
-}
-
-func rerunJob(id int) tea.Cmd {
-	return func() tea.Msg {
-		newID, err := client.Rerun(id)
-		if err != nil {
-			return actionDoneMsg{err: err}
-		}
-		return actionDoneMsg{status: fmt.Sprintf("reran job %d as %d", id, newID)}
-	}
-}
-
-func makeUrgent(id int) tea.Cmd {
-	return func() tea.Msg {
-		err := client.MakeUrgent(id)
-		if err != nil {
-			return actionDoneMsg{err: err}
-		}
-		return actionDoneMsg{status: fmt.Sprintf("job %d moved to front", id)}
 	}
 }

@@ -420,16 +420,19 @@ func (m *model) jobsGoto(idx int) {
 // selection when active (job rows only), otherwise just the cursor job row.
 func (m model) jobsActionRows() []protocol.JobInfo {
 	// Tagged (Space) selection wins; it survives cursor movement like ranger's.
+	// Resolved against every known job, not just the visible rows: a tag that
+	// scrolled out of view behind a filter is still part of the selection the
+	// footer counts, and falling through to the cursor row here would act on a
+	// job the user never picked. refreshJobsRows drops tags for dead jobs, so
+	// everything still tagged exists.
 	if len(m.jobs.tagged) > 0 {
 		var rows []protocol.JobInfo
-		for _, r := range m.jobs.rows {
-			if m.jobs.tagged[r.job.ID] {
-				rows = append(rows, r.job)
+		for _, j := range m.jobs.allJobs {
+			if m.jobs.tagged[j.ID] {
+				rows = append(rows, j)
 			}
 		}
-		if len(rows) > 0 {
-			return rows
-		}
+		return rows
 	}
 	if m.jobs.visual {
 		lo, hi := m.visualRange()

@@ -188,6 +188,130 @@ func TestRequestJobsViewSignal(t *testing.T) {
 	}
 }
 
+// TestRemoveJobsBeyondConnCap covers the multi-select delete bug: the TUI used
+// to tea.Batch one connection per selected job, so a selection larger than the
+// daemon's max_conn (10 by default) had most of its jobs refused with "too
+// many connections" while the status line still reported success. The batch
+// client call must run the whole selection over one connection.
+func TestRemoveJobsBeyondConnCap(t *testing.T) {
+	sock := shortSocketPath(t)
+	t.Setenv("QRUSH_SOCKET", sock)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	cfg := config.Load()
+	srv, err := server.New(cfg)
+	if err != nil {
+		t.Fatalf("server.New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go srv.Run(ctx)
+	t.Cleanup(func() { srv.Shutdown(); cancel() })
+	waitForSocket(t, sock)
+
+	// Comfortably more jobs than the connection cap allows at once.
+	const n = 30
+	if cfg.MaxConn >= n {
+		t.Fatalf("test needs max_conn (%d) below %d to be meaningful", cfg.MaxConn, n)
+	}
+	ids := make([]int, 0, n)
+	for i := 0; i < n; i++ {
+		id, err := client.SubmitJob([]string{"true"}, client.SubmitOpts{})
+		if err != nil {
+			t.Fatalf("SubmitJob %d: %v", i, err)
+		}
+		ids = append(ids, id)
+	}
+	waitAllFinished(t, ids)
+
+	res, err := client.RemoveJobs(ids)
+	if err != nil {
+		t.Fatalf("RemoveJobs: %v", err)
+	}
+	if res.OK != n || res.Failed != 0 {
+		t.Fatalf("RemoveJobs removed %d/%d (failed %d, first failure job %d: %v); "+
+			"a selection larger than max_conn must still delete in full",
+			res.OK, n, res.Failed, res.FirstID, res.Err)
+	}
+
+	list, err := client.ListJobs()
+	if err != nil {
+		t.Fatalf("ListJobs: %v", err)
+	}
+	if len(list.Jobs) != 0 {
+		t.Fatalf("%d jobs survived the delete: %v", len(list.Jobs), list.Jobs)
+	}
+}
+
+// TestRemoveJobsPartialFailure: a job the daemon refuses (a running one) is
+// counted and reported rather than aborting the rest of the batch.
+func TestRemoveJobsPartialFailure(t *testing.T) {
+	sock := shortSocketPath(t)
+	t.Setenv("QRUSH_SOCKET", sock)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	srv, err := server.New(config.Load())
+	if err != nil {
+		t.Fatalf("server.New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go srv.Run(ctx)
+	t.Cleanup(func() { srv.Shutdown(); cancel() })
+	waitForSocket(t, sock)
+
+	// One long runner occupies the single slot; the rest queue behind it.
+	running, err := client.SubmitJob([]string{"sleep", "60"}, client.SubmitOpts{})
+	if err != nil {
+		t.Fatalf("SubmitJob runner: %v", err)
+	}
+	ids := []int{running}
+	for i := 0; i < 12; i++ {
+		id, err := client.SubmitJob([]string{"true"}, client.SubmitOpts{})
+		if err != nil {
+			t.Fatalf("SubmitJob %d: %v", i, err)
+		}
+		ids = append(ids, id)
+	}
+	waitForState(t, running, protocol.StateRunning)
+
+	res, err := client.RemoveJobs(ids)
+	if err != nil {
+		t.Fatalf("RemoveJobs: %v", err)
+	}
+	// The queued ones go; the running one is refused, and the refusal does not
+	// take the connection (and so the rest of the batch) down with it.
+	if res.OK != len(ids)-1 || res.Failed != 1 {
+		t.Fatalf("RemoveJobs ok=%d failed=%d, want ok=%d failed=1", res.OK, res.Failed, len(ids)-1)
+	}
+	if res.FirstID != running || res.Err == nil {
+		t.Fatalf("expected the running job %d to be the reported failure, got %d: %v",
+			running, res.FirstID, res.Err)
+	}
+}
+
+func waitAllFinished(t *testing.T, ids []int) {
+	t.Helper()
+	for _, id := range ids {
+		waitForState(t, id, protocol.StateFinished)
+	}
+}
+
+func waitForState(t *testing.T, id int, want protocol.JobState) {
+	t.Helper()
+	for i := 0; i < 200; i++ {
+		state, err := client.GetState(id)
+		if err != nil {
+			t.Fatalf("GetState(%d): %v", id, err)
+		}
+		if state == want {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("job %d never reached state %v", id, want)
+}
+
 func waitForSocket(t *testing.T, sock string) {
 	t.Helper()
 	for i := 0; i < 100; i++ {

@@ -223,6 +223,39 @@ func TestJobsSpaceToggleUntags(t *testing.T) {
 	}
 }
 
+// A tag that the current filter scrolled out of view is still part of the
+// selection: actions must target the tagged jobs, never silently fall back to
+// the cursor row (which would delete a job the user never picked).
+func TestJobsTaggedOutOfViewStillTargeted(t *testing.T) {
+	all := []protocol.JobInfo{
+		{ID: 3, Session: "default"},
+		{ID: 5, Session: "default"},
+		{ID: 9, Session: "default"},
+	}
+	m := model{viewMode: viewJobs}
+	m.jobs.allJobs = all
+	m.jobs.rows = jobRows(all)
+
+	got, _ := m.handleJobsKey(tea.KeyMsg{Type: tea.KeySpace}) // tag 3
+	fm := got.(model)
+	got, _ = fm.handleJobsKey(tea.KeyMsg{Type: tea.KeySpace}) // tag 5
+	fm = got.(model)
+
+	// A filter narrows the table to job 9 only; 3 and 5 stay tagged.
+	fm.jobs.rows = jobRows(all[2:])
+	fm.jobs.cursor = 0
+
+	ids := fm.jobsActionIDs()
+	if len(ids) != 2 {
+		t.Fatalf("expected the 2 tagged jobs, got %v", ids)
+	}
+	for _, id := range ids {
+		if id == 9 {
+			t.Fatalf("action fell back to the cursor row; targets = %v", ids)
+		}
+	}
+}
+
 // jobRows wraps plain jobs as management job-rows for tests.
 func jobRows(jobs []protocol.JobInfo) []mgmtRow {
 	rows := make([]mgmtRow, len(jobs))
